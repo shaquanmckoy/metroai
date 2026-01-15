@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 
 const APP_ID = 1089;
 
@@ -47,7 +48,74 @@ function formatTime(ms: number) {
   return new Date(ms).toLocaleString();
 }
 
+/** ================= ADMIN STRATEGY FLAGS (NEW) =================
+ * Stored in localStorage under STRATEGY_FLAGS_KEY.
+ * These flags are enforced for USERS only. Admins always see everything.
+ */
+const STRATEGY_FLAGS_KEY = "strategy_flags";
+
+type StrategyKey = "matches" | "overunder";
+type StrategyFlags = Record<StrategyKey, boolean>;
+
+const DEFAULT_FLAGS: StrategyFlags = {
+  matches: true,
+  overunder: true,
+};
+
+function readStrategyFlags(): StrategyFlags {
+  try {
+    const raw = localStorage.getItem(STRATEGY_FLAGS_KEY);
+    if (!raw) return DEFAULT_FLAGS;
+    const parsed = JSON.parse(raw) as Partial<StrategyFlags>;
+    return {
+      matches: typeof parsed.matches === "boolean" ? parsed.matches : true,
+      overunder: typeof parsed.overunder === "boolean" ? parsed.overunder : true,
+    };
+  } catch {
+    return DEFAULT_FLAGS;
+  }
+}
+
 export default function Dashboard() {
+  const router = useRouter();
+
+  // ✅ auth gate (prevents direct access after logout)
+  const [authChecked, setAuthChecked] = useState(false);
+  const [isAdmin, setIsAdmin] = useState(false);
+
+  // ✅ which strategies are enabled for USERS (admins ignore these)
+  const [strategyFlags, setStrategyFlags] = useState<StrategyFlags>(DEFAULT_FLAGS);
+
+  useEffect(() => {
+    const loggedIn = localStorage.getItem("loggedIn") === "true";
+    const role = (localStorage.getItem("role") || "").toLowerCase();
+
+    if (!loggedIn) {
+      router.replace("/");
+      return;
+    }
+
+    // ✅ allow admin to stay on dashboard too
+    const admin = role === "admin";
+    setIsAdmin(admin);
+
+    // ✅ load flags (used for non-admin users)
+    setStrategyFlags(readStrategyFlags());
+
+    setAuthChecked(true);
+  }, [router]);
+
+  // ✅ live-update if admin changes flags in another tab/page
+  useEffect(() => {
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === STRATEGY_FLAGS_KEY) {
+        setStrategyFlags(readStrategyFlags());
+      }
+    };
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+  }, []);
+
   const wsRef = useRef<WebSocket | null>(null);
   const authorizedRef = useRef(false);
 
@@ -117,9 +185,7 @@ export default function Dashboard() {
   const [analysisOpen, setAnalysisOpen] = useState(false);
 
   // per-pair meta (for display + decision)
-  const [pairMeta, setPairMeta] = useState<
-    Record<Pair, { count: number; lowDigit?: number; lowPct?: number }>
-  >({
+  const [pairMeta, setPairMeta] = useState<Record<Pair, { count: number; lowDigit?: number; lowPct?: number }>>({
     R_10: { count: 0 },
     R_25: { count: 0 },
     R_50: { count: 0 },
@@ -131,6 +197,15 @@ export default function Dashboard() {
   const metroXNetProfit = useMemo(() => {
     return tradeHistoryMatches.reduce((acc, t) => acc + Number(t.profit ?? 0), 0);
   }, [tradeHistoryMatches]);
+
+  // ✅ cleanup socket when leaving dashboard
+  useEffect(() => {
+    return () => {
+      try {
+        wsRef.current?.close();
+      } catch {}
+    };
+  }, []);
 
   const safeSend = (payload: unknown) => {
     const ws = wsRef.current;
@@ -324,8 +399,7 @@ export default function Dashboard() {
 
         contractToReqRef.current[contract_id] = req_id;
 
-        const apply = (arr: Trade[]) =>
-          arr.map((t) => (t.id === req_id ? { ...t, contract_id } : t));
+        const apply = (arr: Trade[]) => arr.map((t) => (t.id === req_id ? { ...t, contract_id } : t));
         setTradeHistoryMatches((prev) => apply(prev));
         setTradeHistoryOverUnder((prev) => apply(prev));
 
@@ -346,8 +420,7 @@ export default function Dashboard() {
         const req_id = contractToReqRef.current[contract_id];
         if (!req_id) return;
 
-        const finished =
-          poc.is_sold || poc.status === "sold" || poc.is_expired || poc.status === "expired";
+        const finished = poc.is_sold || poc.status === "sold" || poc.is_expired || poc.status === "expired";
         if (!finished) return;
 
         const profit = Number(poc.profit ?? 0);
@@ -363,9 +436,7 @@ export default function Dashboard() {
         }
 
         const update = (arr: Trade[]) =>
-          arr.map((t) =>
-            t.id === req_id ? { ...t, result, profit, payout, settlementDigit } : t
-          );
+          arr.map((t) => (t.id === req_id ? { ...t, result, profit, payout, settlementDigit } : t));
 
         setTradeHistoryMatches((prev) => update(prev));
         setTradeHistoryOverUnder((prev) => update(prev));
@@ -400,7 +471,7 @@ export default function Dashboard() {
   const logout = () => {
     disconnect();
     localStorage.clear();
-    window.location.href = "/";
+    router.replace("/");
   };
 
   useEffect(() => {
@@ -414,8 +485,7 @@ export default function Dashboard() {
   const placeTrade = (type: TradeType, durationTicks: number) => {
     if (selectedDigit === null) return alert("Select a digit first");
     if (!stake || stake <= 0) return alert("Enter a stake amount");
-    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN)
-      return alert("WebSocket not connected yet");
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return alert("WebSocket not connected yet");
     if (!authorizedRef.current) return alert("Not authorized yet");
 
     const req_id = newReqId();
@@ -452,8 +522,7 @@ export default function Dashboard() {
 
   // Place one DIFFERS trade for symbol+digit and wait for buy-ack (safe for fast bursts)
   const placeDiffersAndWaitBuyAck = async (symbol: Pair, digit: number) => {
-    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN)
-      throw new Error("WebSocket not connected");
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) throw new Error("WebSocket not connected");
     if (!authorizedRef.current) throw new Error("Not authorized");
 
     const req_id = newReqId();
@@ -494,9 +563,7 @@ export default function Dashboard() {
 
     await Promise.race([
       p,
-      new Promise<void>((_, reject) =>
-        setTimeout(() => reject(new Error("Timed out waiting for buy ack")), 9000)
-      ),
+      new Promise<void>((_, reject) => setTimeout(() => reject(new Error("Timed out waiting for buy ack")), 9000)),
     ]);
   };
 
@@ -533,8 +600,7 @@ export default function Dashboard() {
     }
 
     if (!stake || stake <= 0) return alert("Enter a stake amount");
-    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN)
-      return alert("WebSocket not connected yet");
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return alert("WebSocket not connected yet");
     if (!authorizedRef.current) return alert("Not authorized yet");
 
     auto5xCancelRef.current = false;
@@ -571,8 +637,7 @@ export default function Dashboard() {
           if (last20.length < 20) continue;
 
           const low = lowestDigitFromList(last20);
-          if (low.percent <= 8.0)
-            candidates.push({ symbol: sym, digit: low.digit, percent: low.percent });
+          if (low.percent <= 8.0) candidates.push({ symbol: sym, digit: low.digit, percent: low.percent });
         }
 
         if (candidates.length === 0) {
@@ -585,9 +650,7 @@ export default function Dashboard() {
         const pick = candidates[0];
 
         setAnalysisStatus(
-          `Placing trade ${placed + 1}/5: ${pick.symbol} digit ${pick.digit} (${pick.percent.toFixed(
-            1
-          )}%)`
+          `Placing trade ${placed + 1}/5: ${pick.symbol} digit ${pick.digit} (${pick.percent.toFixed(1)}%)`
         );
 
         try {
@@ -603,9 +666,7 @@ export default function Dashboard() {
       if (auto5xCancelRef.current) {
         setAnalysisStatus(`Stopped by user. Trades placed: ${placed}/5`);
       } else if (placed === 0) {
-        setAnalysisStatus(
-          "No trades placed within 5 seconds (all pairs > 8.0% or not enough cached ticks)."
-        );
+        setAnalysisStatus("No trades placed within 5 seconds (all pairs > 8.0% or not enough cached ticks).");
       } else if (placed < 5) {
         setAnalysisStatus(`Finished (time limit reached). Trades placed: ${placed}/5`);
       } else {
@@ -618,6 +679,20 @@ export default function Dashboard() {
       auto5xCancelRef.current = false;
     }
   };
+
+  // ✅ enforce strategy availability for USERS (NEW)
+  const isStrategyEnabledForViewer = (key: StrategyKey) => {
+    if (isAdmin) return true;
+    return strategyFlags[key] !== false;
+  };
+
+  // ✅ if admin disables a strategy while a USER is viewing it, close it (NEW)
+  useEffect(() => {
+    if (isAdmin) return;
+    if (activeStrategy === "matches" && !isStrategyEnabledForViewer("matches")) setActiveStrategy(null);
+    if (activeStrategy === "overunder" && !isStrategyEnabledForViewer("overunder")) setActiveStrategy(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [strategyFlags, isAdmin]);
 
   // remount MetroX panel when strategy changes
   useEffect(() => {
@@ -632,6 +707,15 @@ export default function Dashboard() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeStrategy]);
+
+  // ✅ prevent UI showing before auth is checked
+  if (!authChecked) {
+    return (
+      <main className="min-h-screen bg-black text-white flex items-center justify-center">
+        Loading...
+      </main>
+    );
+  }
 
   return (
     <main className="min-h-screen relative overflow-hidden text-white">
@@ -656,7 +740,15 @@ export default function Dashboard() {
 
           <nav className="flex items-center gap-6 text-sm text-gray-300">
             <span className="text-green-400">● {connected ? "Connected" : "Disconnected"}</span>
-            <button onClick={() => (window.location.href = "/")}>Home</button>
+            <button onClick={() => router.push("/")}>Home</button>
+
+            {/* ✅ only show Admin button for admins */}
+            {isAdmin && (
+              <button onClick={() => router.push("/admin")} className="text-red-200 hover:text-red-300">
+                Admin
+              </button>
+            )}
+
             <button>Analyzer</button>
             <button>Auto Trader</button>
             <button onClick={logout} className="hover:text-red-400">
@@ -732,25 +824,42 @@ export default function Dashboard() {
             <div className="bg-[#13233d]/80 backdrop-blur rounded-2xl p-6 border border-white/10 shadow-[0_0_0_1px_rgba(255,255,255,0.06)]">
               <h2 className="font-semibold mb-4 text-white/90">Trading Strategies</h2>
 
-              <StrategyRow
-                title="MetroX"
-                description="Matches/Differs strategy"
-                active={activeStrategy === "matches"}
-                onToggle={() => setActiveStrategy(activeStrategy === "matches" ? null : "matches")}
-              />
+              {/* ✅ show/hide based on admin flags (NEW) */}
+              {isStrategyEnabledForViewer("matches") ? (
+                <StrategyRow
+                  title="MetroX"
+                  description="Matches/Differs strategy"
+                  active={activeStrategy === "matches"}
+                  onToggle={() => setActiveStrategy(activeStrategy === "matches" ? null : "matches")}
+                />
+              ) : (
+                !isAdmin && (
+                  <div className="mb-4 rounded-lg bg-black/20 border border-white/10 p-3 text-xs text-white/60">
+                    MetroX is currently disabled by admin.
+                  </div>
+                )
+              )}
 
-              <StrategyRow
-                title="Over / Under"
-                description="Digit threshold probability strategy"
-                active={activeStrategy === "overunder"}
-                onToggle={() => setActiveStrategy(activeStrategy === "overunder" ? null : "overunder")}
-              />
+              {isStrategyEnabledForViewer("overunder") ? (
+                <StrategyRow
+                  title="Over / Under"
+                  description="Digit threshold probability strategy"
+                  active={activeStrategy === "overunder"}
+                  onToggle={() => setActiveStrategy(activeStrategy === "overunder" ? null : "overunder")}
+                />
+              ) : (
+                !isAdmin && (
+                  <div className="mb-1 rounded-lg bg-black/20 border border-white/10 p-3 text-xs text-white/60">
+                    Over / Under is currently disabled by admin.
+                  </div>
+                )
+              )}
             </div>
           </div>
 
           {/* RIGHT */}
           <div className="rounded-2xl p-0 border border-white/10 overflow-hidden shadow-[0_0_0_1px_rgba(255,255,255,0.06)]">
-            {activeStrategy === "matches" && (
+            {activeStrategy === "matches" && isStrategyEnabledForViewer("matches") && (
               <MetroXPanel
                 key={metroXResetKey}
                 ticks={ticks}
@@ -787,7 +896,7 @@ export default function Dashboard() {
               />
             )}
 
-            {activeStrategy === "overunder" && (
+            {activeStrategy === "overunder" && isStrategyEnabledForViewer("overunder") && (
               <div className="bg-[#13233d] p-6">
                 <StrategyPanel
                   type="overunder"
@@ -804,6 +913,7 @@ export default function Dashboard() {
               </div>
             )}
 
+            {/* ✅ if user selects a disabled strategy, show the default empty state */}
             {!activeStrategy && (
               <div className="bg-gradient-to-br from-[#1b2235] to-[#121826] p-6 min-h-[520px] flex items-center justify-center">
                 <div className="text-center text-gray-300/80 max-w-sm">
@@ -1109,8 +1219,7 @@ function MetroXPanel({
         {intelligentOn && (
           <div className="mt-3 rounded-lg bg-black/20 border border-white/10 p-4">
             <p className="text-xs text-white/60">
-              Recent Ticks (Analyzing{" "}
-              <span className="font-semibold text-white/80">{intelligentTotal}</span> total):
+              Recent Ticks (Analyzing <span className="font-semibold text-white/80">{intelligentTotal}</span> total):
             </p>
 
             <div className="mt-2 text-sm tracking-widest text-emerald-300 font-semibold">
@@ -1118,21 +1227,16 @@ function MetroXPanel({
             </div>
 
             {intelligentTotal < 20 ? (
-              <div className="mt-3 text-sm font-semibold text-yellow-200">
-                WAIT FOR 20 TICKS ({intelligentTotal}/20)
-              </div>
+              <div className="mt-3 text-sm font-semibold text-yellow-200">WAIT FOR 20 TICKS ({intelligentTotal}/20)</div>
             ) : (
               <div className="mt-4 text-center">
                 <div className="text-xs text-white/60 flex items-center justify-center gap-2">
                   <span>🧠</span>
                   <span>Least Frequent Digit</span>
                 </div>
-                <div className="mt-2 text-5xl font-extrabold text-yellow-200 leading-none">
-                  {intelligentLeast ?? "—"}
-                </div>
+                <div className="mt-2 text-5xl font-extrabold text-yellow-200 leading-none">{intelligentLeast ?? "—"}</div>
                 <div className="mt-2 text-xs text-white/70">
-                  ⚡ Best digit to trade{" "}
-                  <span className="font-semibold text-yellow-200">DIFFERS</span>
+                  ⚡ Best digit to trade <span className="font-semibold text-yellow-200">DIFFERS</span>
                 </div>
               </div>
             )}
@@ -1143,8 +1247,7 @@ function MetroXPanel({
       {/* DIGITS */}
       <div className="mt-2">
         <p className="text-sm text-white/80 mb-2">
-          Last digit prediction - Click any digit to select for{" "}
-          <span className="font-semibold">{mdTradeType.toUpperCase()}</span> trade
+          Last digit prediction - Click any digit to select for <span className="font-semibold">{mdTradeType.toUpperCase()}</span> trade
         </p>
 
         <div className="grid grid-cols-5 gap-3">
@@ -1170,17 +1273,7 @@ function MetroXPanel({
             const liveCls = "bg-emerald-600/20 border-emerald-500/30 text-white";
             const highCls = "bg-red-600/20 border-red-500/35 text-white";
 
-            const cls = selected
-              ? selectedCls
-              : won
-              ? wonCls
-              : lost
-              ? lostCls
-              : live
-              ? liveCls
-              : high
-              ? highCls
-              : base;
+            const cls = selected ? selectedCls : won ? wonCls : lost ? lostCls : live ? liveCls : high ? highCls : base;
 
             return (
               <button
@@ -1188,24 +1281,11 @@ function MetroXPanel({
                 onClick={() => setSelectedDigit(d)}
                 className={`relative rounded-full py-3 text-center border transition ${cls}`}
               >
-                {/* selected */}
                 {selected && <span className="absolute top-2 right-3 text-white text-sm">✓</span>}
-
-                {/* win */}
                 {!selected && won && <span className="absolute top-2 right-3 text-emerald-100 text-sm">💰</span>}
-
-                {/* loss */}
                 {!selected && !won && lost && <span className="absolute top-2 right-3 text-red-100 text-sm">❌</span>}
-
-                {/* live */}
-                {!selected && !won && !lost && live && (
-                  <span className="absolute top-2 right-3 text-emerald-200 text-sm">●</span>
-                )}
-
-                {/* high */}
-                {!selected && !won && !lost && !live && high && (
-                  <span className="absolute top-2 right-3 text-red-200 text-sm">▲</span>
-                )}
+                {!selected && !won && !lost && live && <span className="absolute top-2 right-3 text-emerald-200 text-sm">●</span>}
+                {!selected && !won && !lost && !live && high && <span className="absolute top-2 right-3 text-red-200 text-sm">▲</span>}
 
                 <div className="text-lg font-bold leading-none">{d}</div>
                 <div className="mt-1 text-[11px] text-white/60">{pct.toFixed(1)}%</div>
@@ -1215,8 +1295,7 @@ function MetroXPanel({
         </div>
 
         <p className="text-xs text-white/50 mt-3">
-          Based on {ticks.length} ticks from{" "}
-          <span className="font-semibold">{selectedPair}</span> • Last Digit:{" "}
+          Based on {ticks.length} ticks from <span className="font-semibold">{selectedPair}</span> • Last Digit:{" "}
           <span className="text-green-400 font-semibold">{lastDigit !== null ? lastDigit : "-"}</span>
         </p>
 
@@ -1246,10 +1325,7 @@ function MetroXPanel({
                   {Array.from({ length: 10 }, (_, d) => {
                     const pct20 = (counts[d] / last20.length) * 100;
                     return (
-                      <div
-                        key={d}
-                        className="rounded-md border border-white/10 bg-black/10 px-2 py-2 text-center"
-                      >
+                      <div key={d} className="rounded-md border border-white/10 bg-black/10 px-2 py-2 text-center">
                         <div className="font-semibold">{d}</div>
                         <div>{counts[d]} / 20</div>
                         <div className="text-white/55">{pct20.toFixed(1)}%</div>
@@ -1260,9 +1336,7 @@ function MetroXPanel({
               )}
 
               <div className="mt-3 border-t border-white/10 pt-3">
-                <p className="text-[11px] text-white/60 mb-2">
-                  Per-pair cache status (used by 5x AutoTrading)
-                </p>
+                <p className="text-[11px] text-white/60 mb-2">Per-pair cache status (used by 5x AutoTrading)</p>
                 <div className="grid grid-cols-1 gap-1 text-[11px] text-white/70">
                   {PAIRS.map((p) => {
                     const m = pairMeta[p];
@@ -1337,9 +1411,7 @@ function MetroXPanel({
         </div>
 
         {analysisStatus && (
-          <div className="rounded-lg bg-white/5 border border-white/10 p-3 text-xs text-white/70">
-            {analysisStatus}
-          </div>
+          <div className="rounded-lg bg-white/5 border border-white/10 p-3 text-xs text-white/70">{analysisStatus}</div>
         )}
       </div>
 
@@ -1379,9 +1451,7 @@ function TradeHistoryMetroLike({
     <div className="mt-6 rounded-xl bg-gradient-to-br from-[#0f1b2d] to-[#0b1220] border border-white/10 p-4">
       <div className="flex items-center justify-between mb-3">
         <div className="flex items-center gap-2">
-          <span className="w-8 h-8 rounded-lg bg-white/5 border border-white/10 flex items-center justify-center">
-            🏆
-          </span>
+          <span className="w-8 h-8 rounded-lg bg-white/5 border border-white/10 flex items-center justify-center">🏆</span>
           <p className="font-semibold text-white/90">Trade History</p>
         </div>
 
@@ -1406,10 +1476,7 @@ function TradeHistoryMetroLike({
         <div className="rounded-lg bg-white/5 border border-white/10 p-3">
           <p className="text-xs text-white/60">Win Rate</p>
           <p className="text-2xl font-bold text-sky-300">
-            {winRate.toFixed(1)}%{" "}
-            <span className="text-xs text-white/50">
-              ({wins}/{done || 0})
-            </span>
+            {winRate.toFixed(1)}% <span className="text-xs text-white/50">({wins}/{done || 0})</span>
           </p>
         </div>
       </div>
@@ -1418,9 +1485,7 @@ function TradeHistoryMetroLike({
         <button
           onClick={() => setTab("all")}
           className={`flex-1 rounded-full py-2 text-xs border ${
-            tab === "all"
-              ? "bg-sky-600/25 border-sky-500/30 text-white"
-              : "bg-white/5 border-white/10 text-white/70"
+            tab === "all" ? "bg-sky-600/25 border-sky-500/30 text-white" : "bg-white/5 border-white/10 text-white/70"
           }`}
         >
           🧾 All Trades ({tradeHistory.length})
@@ -1442,7 +1507,7 @@ function TradeHistoryMetroLike({
           className={`flex-1 rounded-full py-2 text-xs border ${
             tab === "losses"
               ? "bg-red-600/20 border-red-500/30 text-white"
-              : "bg-white/5 border-white/10 text-white/70"
+              : "bg-white/5 border border-white/10 text-white/70"
           }`}
         >
           ❌ Losses ({losses})
@@ -1451,9 +1516,7 @@ function TradeHistoryMetroLike({
 
       <div className="max-h-72 overflow-y-auto space-y-3 pr-1">
         {filtered.length === 0 ? (
-          <div className="rounded-lg bg-white/5 border border-white/10 p-3 text-xs text-white/60">
-            No trades in this tab.
-          </div>
+          <div className="rounded-lg bg-white/5 border border-white/10 p-3 text-xs text-white/60">No trades in this tab.</div>
         ) : (
           filtered.map((t, idx) => {
             const pillColor =
@@ -1464,17 +1527,10 @@ function TradeHistoryMetroLike({
                 : "bg-red-500/15 border-red-400/20 text-red-200";
 
             const profitVal = Number(t.profit ?? 0);
-            const profitText =
-              t.result === "Pending"
-                ? ""
-                : `${profitVal >= 0 ? "+" : ""}${profitVal.toFixed(2)} ${currency}`;
+            const profitText = t.result === "Pending" ? "" : `${profitVal >= 0 ? "+" : ""}${profitVal.toFixed(2)} ${currency}`;
 
             const statusLabel =
-              t.result === "Pending"
-                ? "Pending"
-                : t.result === "Win"
-                ? "Completed - Won"
-                : "Completed - Lost";
+              t.result === "Pending" ? "Pending" : t.result === "Win" ? "Completed - Won" : "Completed - Lost";
 
             return (
               <div key={idx} className="rounded-xl bg-white/5 border border-white/10 p-3">
@@ -1488,11 +1544,7 @@ function TradeHistoryMetroLike({
 
                   <div
                     className={`text-sm font-semibold ${
-                      t.result === "Win"
-                        ? "text-emerald-300"
-                        : t.result === "Loss"
-                        ? "text-red-300"
-                        : "text-white/60"
+                      t.result === "Win" ? "text-emerald-300" : t.result === "Loss" ? "text-red-300" : "text-white/60"
                     }`}
                   >
                     {profitText}
@@ -1500,9 +1552,7 @@ function TradeHistoryMetroLike({
                 </div>
 
                 <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px]">
-                  <span className="px-2 py-0.5 rounded-full border border-white/10 bg-black/10 text-white/70">
-                    MetroX
-                  </span>
+                  <span className="px-2 py-0.5 rounded-full border border-white/10 bg-black/10 text-white/70">MetroX</span>
                   <span className="px-2 py-0.5 rounded-full border border-white/10 bg-black/10 text-white/70">
                     {t.durationTicks} tick{t.durationTicks > 1 ? "s" : ""}
                   </span>
@@ -1510,8 +1560,7 @@ function TradeHistoryMetroLike({
                     Entry: {t.type.toUpperCase()} {t.digit}
                   </span>
                   <span className="px-2 py-0.5 rounded-full border border-white/10 bg-black/10 text-white/70">
-                    Exit Digit:{" "}
-                    {typeof t.settlementDigit === "number" ? t.settlementDigit : "-"}
+                    Exit Digit: {typeof t.settlementDigit === "number" ? t.settlementDigit : "-"}
                   </span>
                 </div>
 
@@ -1542,15 +1591,7 @@ function TradeHistoryMetroLike({
 
                   <div className="col-span-2 flex items-center justify-between rounded-lg bg-black/10 border border-white/10 px-2 py-2">
                     <span className="text-white/55">Status</span>
-                    <span
-                      className={
-                        t.result === "Win"
-                          ? "text-emerald-300"
-                          : t.result === "Loss"
-                          ? "text-red-300"
-                          : "text-yellow-300"
-                      }
-                    >
+                    <span className={t.result === "Win" ? "text-emerald-300" : t.result === "Loss" ? "text-red-300" : "text-yellow-300"}>
                       {statusLabel}
                     </span>
                   </div>
@@ -1625,9 +1666,7 @@ function StrategyPanel({
           className="bg-black/30 p-2 rounded w-24"
         />
 
-        <div className="bg-black/30 p-2 rounded w-16 text-center">
-          {selectedDigit !== null ? selectedDigit : "-"}
-        </div>
+        <div className="bg-black/30 p-2 rounded w-16 text-center">{selectedDigit !== null ? selectedDigit : "-"}</div>
       </div>
 
       <div className="grid grid-cols-5 gap-3 mb-3">
