@@ -4,8 +4,24 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 
 type LoginResponse =
-  | { ok: true; user: { id: string | number; email: string; role: "admin" | "user" } }
-  | { ok: false; error?: string };
+  | {
+      ok: true;
+      user: {
+        id: string | number;
+        email: string;
+        role: "admin" | "user";
+      };
+    }
+  | {
+      ok: false;
+      error?: string;
+    };
+
+function getErrorMessage(data: LoginResponse | null, status: number) {
+  if (!data) return `Login failed (HTTP ${status})`;
+  if (data.ok === false) return data.error || `Login failed (HTTP ${status})`;
+  return `Login failed (HTTP ${status})`;
+}
 
 export default function Home() {
   const router = useRouter();
@@ -20,7 +36,7 @@ export default function Home() {
     setError("");
 
     const cleanEmail = email.trim().toLowerCase();
-    const cleanPass = password; // don't trim passwords unless you intentionally want that
+    const cleanPass = password;
 
     if (!cleanEmail || !cleanPass) {
       setError("Please enter email and password");
@@ -36,32 +52,30 @@ export default function Home() {
         body: JSON.stringify({ email: cleanEmail, password: cleanPass }),
       });
 
-      // Safely parse JSON (in case Vercel returns HTML / empty body)
       const text = await res.text();
       let data: LoginResponse | null = null;
+
       try {
         data = text ? (JSON.parse(text) as LoginResponse) : null;
       } catch {
         data = null;
       }
 
+      // ❌ failed login
       if (!res.ok || !data || data.ok !== true) {
-        const msg =
-          (data && "error" in data && data.error) ||
-          `Login failed (HTTP ${res.status}).`;
-        setError(msg);
+        setError(getErrorMessage(data, res.status));
         return;
       }
 
-      // ✅ save auth info from DB response
+      // ✅ Store auth info (server-validated)
       localStorage.setItem("loggedIn", "true");
       localStorage.setItem("role", data.user.role);
       localStorage.setItem("email", data.user.email);
 
-      // ✅ route by role
-      router.replace(data.user.role === "admin" ? "/admin" : "/dashboard");
+      // ✅ ALWAYS go to dashboard (admin button appears there)
+      router.replace("/dashboard");
     } catch {
-      setError("Login failed. Check your server + database connection.");
+      setError("Login failed. Check your server or database connection.");
     } finally {
       setLoading(false);
     }
