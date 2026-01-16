@@ -1,6 +1,8 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+export const dynamic = "force-dynamic";
+
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 
 // ✅ MUST match dashboard/page.tsx
@@ -12,11 +14,11 @@ type Flags = {
   overunder: boolean;
 };
 
-function readFlags(): Flags {
+function readFlagsSafe(): Flags {
   try {
     const raw = localStorage.getItem(STRATEGY_FLAGS_KEY);
     if (!raw) return DEFAULT_STRATEGIES;
-    const parsed = JSON.parse(raw);
+    const parsed = JSON.parse(raw) as Partial<Flags>;
     return {
       matches: typeof parsed.matches === "boolean" ? parsed.matches : true,
       overunder: typeof parsed.overunder === "boolean" ? parsed.overunder : true,
@@ -26,7 +28,7 @@ function readFlags(): Flags {
   }
 }
 
-function saveFlags(flags: Flags) {
+function saveFlagsSafe(flags: Flags) {
   localStorage.setItem(STRATEGY_FLAGS_KEY, JSON.stringify(flags));
   // ✅ same-tab immediate update (storage event doesn't fire in same tab)
   window.dispatchEvent(new Event("storage"));
@@ -34,12 +36,15 @@ function saveFlags(flags: Flags) {
 
 export default function AdminPage() {
   const router = useRouter();
+
   const [ready, setReady] = useState(false);
+  const [email, setEmail] = useState("admin");
 
   const [flags, setFlags] = useState<Flags>(DEFAULT_STRATEGIES);
   const [savedMsg, setSavedMsg] = useState("");
 
   useEffect(() => {
+    // ✅ only run in browser
     const loggedIn = localStorage.getItem("loggedIn") === "true";
     const role = (localStorage.getItem("role") || "").toLowerCase();
 
@@ -52,11 +57,10 @@ export default function AdminPage() {
       return;
     }
 
-    setFlags(readFlags());
+    setEmail(localStorage.getItem("email") || "admin");
+    setFlags(readFlagsSafe());
     setReady(true);
   }, [router]);
-
-  const email = useMemo(() => localStorage.getItem("email") || "admin", []);
 
   const logout = () => {
     localStorage.clear();
@@ -64,16 +68,16 @@ export default function AdminPage() {
   };
 
   const onSave = () => {
-    saveFlags(flags);
+    saveFlagsSafe(flags);
     setSavedMsg("Saved! Users will see the new strategy settings immediately.");
-    setTimeout(() => setSavedMsg(""), 2000);
+    window.setTimeout(() => setSavedMsg(""), 2000);
   };
 
   const onReset = () => {
     setFlags(DEFAULT_STRATEGIES);
-    saveFlags(DEFAULT_STRATEGIES);
+    saveFlagsSafe(DEFAULT_STRATEGIES);
     setSavedMsg("Reset to defaults.");
-    setTimeout(() => setSavedMsg(""), 2000);
+    window.setTimeout(() => setSavedMsg(""), 2000);
   };
 
   if (!ready) {
