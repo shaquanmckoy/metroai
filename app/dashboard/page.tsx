@@ -15,14 +15,6 @@ export const INDEX_GROUPS = {
     { code: "R_75", label: "Volatility 75 Index" },
     { code: "R_100", label: "Volatility 100 Index" },
   ],
-
-  volatility_1s: [
-    { code: "R_10_1HZ", label: "Volatility 10 (1s)" },
-    { code: "R_25_1HZ", label: "Volatility 25 (1s)" },
-    { code: "R_50_1HZ", label: "Volatility 50 (1s)" },
-    { code: "R_75_1HZ", label: "Volatility 75 (1s)" },
-    { code: "R_100_1HZ", label: "Volatility 100 (1s)" },
-  ],
 };
 
 export const PAIRS = [
@@ -31,11 +23,6 @@ export const PAIRS = [
   "R_50",
   "R_75",
   "R_100",
-  "R_10_1HZ",
-  "R_25_1HZ",
-  "R_50_1HZ",
-  "R_75_1HZ",
-  "R_100_1HZ",
 ] as const;
 
 export type Pair = (typeof PAIRS)[number];
