@@ -1134,15 +1134,6 @@ function MetroXPanel({
       </option>
     ))}
   </optgroup>
-
-  <optgroup label="Volatility 1-Second Indices">
-    {INDEX_GROUPS.volatility_1s.map((s) => (
-      <option key={s.code} value={s.code}>
-        {s.label}
-      </option>
-    ))}
-  </optgroup>
-
 </select>
         </div>
 
@@ -1367,7 +1358,6 @@ function MetroXPanel({
 
   const label =
   INDEX_GROUPS.volatility.find(x => x.code === p)?.label ||
-  INDEX_GROUPS.volatility_1s.find(x => x.code === p)?.label ||
   p;
 
   return (
