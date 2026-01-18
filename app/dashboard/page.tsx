@@ -5,9 +5,48 @@ import { useRouter } from "next/navigation";
 
 const APP_ID = 1089;
 
-// ✅ Only Volatility indices (no J_, no 1HZ_)
-const PAIRS = ["R_10", "R_25", "R_50", "R_75", "R_100"] as const;
-type Pair = (typeof PAIRS)[number];
+// ===================== UPDATED INDEX LIST =====================
+
+export const INDEX_GROUPS = {
+  volatility: [
+    { code: "R_10", label: "Volatility 10 Index" },
+    { code: "R_25", label: "Volatility 25 Index" },
+    { code: "R_50", label: "Volatility 50 Index" },
+    { code: "R_75", label: "Volatility 75 Index" },
+    { code: "R_100", label: "Volatility 100 Index" },
+  ],
+
+  volatility_1s: [
+    { code: "R_10_1HZ", label: "Volatility 10 (1s)" },
+    { code: "R_25_1HZ", label: "Volatility 25 (1s)" },
+    { code: "R_50_1HZ", label: "Volatility 50 (1s)" },
+    { code: "R_75_1HZ", label: "Volatility 75 (1s)" },
+    { code: "R_100_1HZ", label: "Volatility 100 (1s)" },
+  ],
+
+  jump: [
+    { code: "JD10", label: "Jump 10 Index" },
+    { code: "JD25", label: "Jump 25 Index" },
+    { code: "JD50", label: "Jump 50 Index" },
+    { code: "JD75", label: "Jump 75 Index" },
+    { code: "JD100", label: "Jump 100 Index" },
+  ],
+
+  rd: [
+    { code: "RDBEAR", label: "RD Bear Market Index" },
+    { code: "RDBULL", label: "RD Bull Market Index" },
+  ],
+};
+
+// Flatten into a simple array for subscriptions & typing
+export const PAIRS = [
+  ...INDEX_GROUPS.volatility.map((x) => x.code),
+  ...INDEX_GROUPS.volatility_1s.map((x) => x.code),
+  ...INDEX_GROUPS.jump.map((x) => x.code),
+  ...INDEX_GROUPS.rd.map((x) => x.code),
+] as const;
+
+export type Pair = (typeof PAIRS)[number];
 
 type TradeResult = "Win" | "Loss" | "Pending";
 type TradeType = "Matches" | "Differs" | "Over" | "Under";
@@ -185,13 +224,11 @@ export default function Dashboard() {
   const [analysisOpen, setAnalysisOpen] = useState(false);
 
   // per-pair meta (for display + decision)
-  const [pairMeta, setPairMeta] = useState<Record<Pair, { count: number; lowDigit?: number; lowPct?: number }>>({
-    R_10: { count: 0 },
-    R_25: { count: 0 },
-    R_50: { count: 0 },
-    R_75: { count: 0 },
-    R_100: { count: 0 },
-  });
+  const emptyMeta = Object.fromEntries(
+  PAIRS.map((p) => [p, { count: 0 }])
+) as Record<Pair, { count: number; lowDigit?: number; lowPct?: number }>;
+
+const [pairMeta, setPairMeta] = useState(emptyMeta);
 
   // ✅ left-side Profit/Loss box (same metric as MetroX trade history)
   const metroXNetProfit = useMemo(() => {
@@ -245,8 +282,10 @@ export default function Dashboard() {
   };
 
   const subscribeAllPairs = () => {
-    for (const sym of PAIRS) safeSend({ ticks: sym, subscribe: 1 });
-  };
+  PAIRS.forEach((sym) => {
+    safeSend({ ticks: sym, subscribe: 1 });
+  });
+};
 
   const getLast20FromCache = (sym: Pair) => {
     const arr = pairDigitsRef.current[sym] ?? [];
@@ -295,7 +334,7 @@ export default function Dashboard() {
     contractToReqRef.current = {};
     reqInfoRef.current = {};
 
-    pairDigitsRef.current = { R_10: [], R_25: [], R_50: [], R_75: [], R_100: [] };
+   pairDigitsRef.current = Object.fromEntries(PAIRS.map((p) => [p, []])) as Record<Pair, number[]>;
     setPairMeta({
       R_10: { count: 0 },
       R_25: { count: 0 },
@@ -1111,16 +1150,42 @@ function MetroXPanel({
         <div>
           <p className="text-[11px] text-white/60 mb-1">Select Index</p>
           <select
-            className="w-full bg-[#0e1422] border border-white/10 p-2 rounded-md text-sm"
-            value={selectedPair}
-            onChange={(e) => setSelectedPair(e.target.value as Pair)}
-          >
-            {PAIRS.map((p) => (
-              <option key={p} value={p}>
-                {p}
-              </option>
-            ))}
-          </select>
+  className="w-full bg-[#0e1422] border border-white/10 p-2 rounded-md text-sm"
+  value={selectedPair}
+  onChange={(e) => setSelectedPair(e.target.value as Pair)}
+>
+  <optgroup label="Volatility Indices">
+    {INDEX_GROUPS.volatility.map((s) => (
+      <option key={s.code} value={s.code}>
+        {s.label}
+      </option>
+    ))}
+  </optgroup>
+
+  <optgroup label="Volatility 1-Second Indices">
+    {INDEX_GROUPS.volatility_1s.map((s) => (
+      <option key={s.code} value={s.code}>
+        {s.label}
+      </option>
+    ))}
+  </optgroup>
+
+  <optgroup label="Jump Indices">
+    {INDEX_GROUPS.jump.map((s) => (
+      <option key={s.code} value={s.code}>
+        {s.label}
+      </option>
+    ))}
+  </optgroup>
+
+  <optgroup label="RD Indices">
+    {INDEX_GROUPS.rd.map((s) => (
+      <option key={s.code} value={s.code}>
+        {s.label}
+      </option>
+    ))}
+  </optgroup>
+</select>
         </div>
 
         <div>
@@ -1338,24 +1403,33 @@ function MetroXPanel({
               <div className="mt-3 border-t border-white/10 pt-3">
                 <p className="text-[11px] text-white/60 mb-2">Per-pair cache status (used by 5x AutoTrading)</p>
                 <div className="grid grid-cols-1 gap-1 text-[11px] text-white/70">
-                  {PAIRS.map((p) => {
-                    const m = pairMeta[p];
-                    const has20 = m.count >= 20;
-                    return (
-                      <div
-                        key={p}
-                        className="flex items-center justify-between rounded-md border border-white/10 bg-black/10 px-2 py-2"
-                      >
-                        <span className="font-semibold">{p}</span>
-                        <span className="text-white/60">
-                          {Math.min(m.count, 200)}/200 cached •{" "}
-                          {has20 && m.lowDigit !== undefined && m.lowPct !== undefined
-                            ? `lowest: ${m.lowDigit} (${m.lowPct.toFixed(1)}%)`
-                            : "waiting for 20 ticks..."}
-                        </span>
-                      </div>
-                    );
-                  })}
+                 {PAIRS.map((p) => {
+  const m = pairMeta[p];
+  const has20 = m.count >= 20;
+
+  const label =
+    INDEX_GROUPS.volatility.find(x => x.code === p)?.label ||
+    INDEX_GROUPS.volatility_1s.find(x => x.code === p)?.label ||
+    INDEX_GROUPS.jump.find(x => x.code === p)?.label ||
+    INDEX_GROUPS.rd.find(x => x.code === p)?.label ||
+    p; // fallback
+
+  return (
+    <div
+      key={p}
+      className="flex items-center justify-between rounded-md border border-white/10 bg-black/10 px-2 py-2"
+    >
+      <span className="font-semibold">{label}</span>
+
+      <span className="text-white/60">
+        {Math.min(m.count, 200)}/200 cached •{" "}
+        {has20 && m.lowDigit !== undefined && m.lowPct !== undefined
+          ? `lowest: ${m.lowDigit} (${m.lowPct.toFixed(1)}%)`
+          : "waiting for 20 ticks..."}
+      </span>
+    </div>
+  );
+})}
                 </div>
               </div>
             </div>
