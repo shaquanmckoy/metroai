@@ -193,6 +193,7 @@ export default function Dashboard() {
   const [turboMode, setTurboMode] = useState(false);
 
   const [auto5xRunning, setAuto5xRunning] = useState(false);
+  const [auto1xRunning, setAuto1xRunning] = useState(false);
   const [analysisStatus, setAnalysisStatus] = useState<string>("");
 
   // collapsible analysis box
@@ -627,53 +628,66 @@ const [pairMeta, setPairMeta] = useState(emptyMeta);
       const usedPairs = new Set<Pair>();
       let placed = 0;
 
-      while (placed < 5 && Date.now() < deadline) {
-        if (auto5xCancelRef.current) break;
+      /* ======= NEW PRIORITIZED 5× AUTOTRADING LOGIC ======= */
 
-        const candidates: { symbol: Pair; digit: number; percent: number }[] = [];
+setAnalysisStatus("Analyzing all pairs...");
 
-        for (const sym of PAIRS) {
-          if (usedPairs.has(sym)) continue;
+// Step 1 — Build signals for each pair
+const pairSignals = PAIRS.map((pair) => {
+  const digits = pairDigitsRef.current[pair] ?? [];
 
-          const remaining = Math.max(0, deadline - Date.now());
-          if (remaining <= 0) break;
+  if (digits.length < 20) {
+    return { pair, lowestPct: Infinity, lowestDigit: null };
+  }
 
-          const have20 = (pairDigitsRef.current[sym] ?? []).length >= 20;
-          if (!have20) {
-            setAnalysisStatus(`Waiting for 20 cached ticks: ${sym}...`);
-            const ok = await waitForCache20(sym, Math.min(remaining, 650));
-            if (!ok) continue;
-          }
+  // Count appearances
+  const freq = Array.from({ length: 10 }, () => 0);
+  for (const d of digits.slice(-20)) freq[d]++;
 
-          const last20 = getLast20FromCache(sym);
-          if (last20.length < 20) continue;
+  const percentages = freq.map((f) => (f / 20) * 100);
 
-          const low = lowestDigitFromList(last20);
-          if (low.percent <= 8.0) candidates.push({ symbol: sym, digit: low.digit, percent: low.percent });
-        }
+  // Find lowest digit + pct
+  let lowestDigit = 0;
+  let lowestPct = percentages[0];
+  for (let i = 1; i < 10; i++) {
+    if (percentages[i] < lowestPct) {
+      lowestPct = percentages[i];
+      lowestDigit = i;
+    }
+  }
 
-        if (candidates.length === 0) {
-          setAnalysisStatus("No valid pairs right now (all > 8.0% or still caching).");
-          await sleep(180);
-          continue;
-        }
+  return { pair, lowestPct, lowestDigit };
+});
 
-        candidates.sort((a, b) => a.percent - b.percent);
-        const pick = candidates[0];
+// Step 2 — Sort strongest → weakest
+pairSignals.sort((a, b) => a.lowestPct - b.lowestPct);
 
-        setAnalysisStatus(
-          `Placing trade ${placed + 1}/5: ${pick.symbol} digit ${pick.digit} (${pick.percent.toFixed(1)}%)`
-        );
+// Step 3 — Pick best
+const best = pairSignals[0];
 
-        try {
-          await placeDiffersAndWaitBuyAck(pick.symbol, pick.digit);
-          usedPairs.add(pick.symbol);
-          placed += 1;
-          if (gapMs) await sleep(gapMs);
-        } catch {
-          usedPairs.add(pick.symbol);
-        }
-      }
+if (best.lowestPct <= 5.0 && best.lowestDigit !== null) {
+  setAnalysisStatus(
+    `Best pair: ${best.pair} • Digit: ${best.lowestDigit} • ${best.lowestPct.toFixed(1)}%`
+  );
+
+  try {
+    const result = await placeDiffersAndWaitBuyAck(best.pair, best.lowestDigit);
+
+    // Step 4 — Stop AFTER 1 loss
+    const lastTrade = tradeHistoryMatches[0];
+    if (lastTrade?.result === "Loss") {
+      setAnalysisStatus("AutoTrading stopped — first trade was a LOSS.");
+      auto5xCancelRef.current = true;
+      return;
+    }
+
+    setAnalysisStatus("First trade completed — win detected. AutoTrading finished.");
+  } catch (err) {
+    setAnalysisStatus("Trade could not be placed.");
+  }
+} else {
+  setAnalysisStatus("No valid signals ≤ 5.0%");
+}
 
       if (auto5xCancelRef.current) {
         setAnalysisStatus(`Stopped by user. Trades placed: ${placed}/5`);
@@ -691,7 +705,65 @@ const [pairMeta, setPairMeta] = useState(emptyMeta);
       auto5xCancelRef.current = false;
     }
   };
+/* ================= 1x Auto All Pairs ================= */
 
+const run1xAutoAllPairs = async () => {
+  if (auto1xRunning) return;
+
+  if (!stake || stake <= 0) return alert("Enter a stake amount");
+  if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN)
+    return alert("WebSocket not connected");
+  if (!authorizedRef.current) return alert("Not authorized");
+
+  setAuto1xRunning(true);
+  setAnalysisStatus("Scanning all pairs for <3% opportunities...");
+
+  try {
+    const pairSignals = PAIRS.map((pair) => {
+      const digits = pairDigitsRef.current[pair] ?? [];
+
+      if (digits.length < 20)
+        return { pair, lowestPct: Infinity, lowestDigit: null };
+
+      const last20 = digits.slice(-20);
+      const freq = Array.from({ length: 10 }, () => 0);
+      last20.forEach((d) => freq[d]++);
+      const percentages = freq.map((n) => (n / 20) * 100);
+
+      let lowestDigit = 0;
+      let lowestPct = percentages[0];
+      for (let i = 1; i < 10; i++) {
+        if (percentages[i] < lowestPct) {
+          lowestPct = percentages[i];
+          lowestDigit = i;
+        }
+      }
+
+      return { pair, lowestPct, lowestDigit };
+    });
+
+    pairSignals.sort((a, b) => a.lowestPct - b.lowestPct);
+
+    const best = pairSignals[0];
+
+    if (best.lowestPct < 3.0 && best.lowestDigit !== null) {
+      setAnalysisStatus(
+        `1x Auto: ${best.pair} • Digit ${best.lowestDigit} • ${best.lowestPct.toFixed(1)}%`
+      );
+
+      try {
+        await placeDiffersAndWaitBuyAck(best.pair, best.lowestDigit);
+        setAnalysisStatus("1x Auto trade placed.");
+      } catch {
+        setAnalysisStatus("Trade failed.");
+      }
+    } else {
+      setAnalysisStatus("No valid pairs < 3.0% — no trade placed.");
+    }
+  } finally {
+    setAuto1xRunning(false);
+  }
+};
   // ✅ enforce strategy availability for USERS (NEW)
   const isStrategyEnabledForViewer = (key: StrategyKey) => {
     if (isAdmin) return true;
@@ -905,6 +977,8 @@ const [pairMeta, setPairMeta] = useState(emptyMeta);
                 tradeHistory={tradeHistoryMatches}
                 onClearHistory={() => setTradeHistoryMatches([])}
                 currency={currency}
+                run1xAutoAllPairs={run1xAutoAllPairs}
+                auto1xRunning={auto1xRunning}
               />
             )}
 
@@ -945,6 +1019,7 @@ const [pairMeta, setPairMeta] = useState(emptyMeta);
     </main>
   );
 }
+
 
 /* ================= STRATEGY TOGGLE ================= */
 
@@ -1011,6 +1086,8 @@ function MetroXPanel({
   tradeHistory,
   onClearHistory,
   currency,
+  run1xAutoAllPairs,
+  auto1xRunning,
 }: {
   ticks: number[];
   pipSize: number;
@@ -1054,6 +1131,8 @@ function MetroXPanel({
   onClearHistory: () => void;
 
   currency: string;
+  run1xAutoAllPairs: () => void;
+  auto1xRunning: boolean;
 }) {
   // ✅ use full tick list for % display
   const digitPercent = (d: number) => {
@@ -1413,6 +1492,15 @@ function MetroXPanel({
         >
           {auto5xRunning ? "Stop 5x AutoTrading" : "5x AutoTrading"}
         </button>
+        <button
+  onClick={run1xAutoAllPairs}
+  disabled={auto1xRunning}
+  className={`w-full rounded-md py-3 text-sm font-semibold shadow-[0_0_0_1px_rgba(255,255,255,0.10)] ${
+    auto1xRunning ? "bg-slate-600 cursor-not-allowed" : "bg-indigo-600 hover:bg-indigo-700"
+  }`}
+>
+  {auto1xRunning ? "Scanning..." : "1x Auto All Pairs"}
+</button>
 
         <div className="flex items-center justify-between px-2 text-xs text-white/70">
           <span>Turbo Mode</span>
