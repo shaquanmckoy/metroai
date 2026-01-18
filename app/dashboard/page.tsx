@@ -23,27 +23,19 @@ export const INDEX_GROUPS = {
     { code: "R_75_1HZ", label: "Volatility 75 (1s)" },
     { code: "R_100_1HZ", label: "Volatility 100 (1s)" },
   ],
-
-  jump: [
-    { code: "JD10", label: "Jump 10 Index" },
-    { code: "JD25", label: "Jump 25 Index" },
-    { code: "JD50", label: "Jump 50 Index" },
-    { code: "JD75", label: "Jump 75 Index" },
-    { code: "JD100", label: "Jump 100 Index" },
-  ],
-
-  rd: [
-    { code: "RDBEAR", label: "RD Bear Market Index" },
-    { code: "RDBULL", label: "RD Bull Market Index" },
-  ],
 };
 
-// Flatten into a simple array for subscriptions & typing
 export const PAIRS = [
-  ...INDEX_GROUPS.volatility.map((x) => x.code),
-  ...INDEX_GROUPS.volatility_1s.map((x) => x.code),
-  ...INDEX_GROUPS.jump.map((x) => x.code),
-  ...INDEX_GROUPS.rd.map((x) => x.code),
+  "R_10",
+  "R_25",
+  "R_50",
+  "R_75",
+  "R_100",
+  "R_10_1HZ",
+  "R_25_1HZ",
+  "R_50_1HZ",
+  "R_75_1HZ",
+  "R_100_1HZ",
 ] as const;
 
 export type Pair = (typeof PAIRS)[number];
@@ -162,13 +154,9 @@ export default function Dashboard() {
   const [metroXResetKey, setMetroXResetKey] = useState(0);
 
   // per-pair rolling digits cache
-  const pairDigitsRef = useRef<Record<Pair, number[]>>({
-    R_10: [],
-    R_25: [],
-    R_50: [],
-    R_75: [],
-    R_100: [],
-  });
+  const pairDigitsRef = useRef<Record<Pair, number[]>>(
+  Object.fromEntries(PAIRS.map((p) => [p, []])) as unknown as Record<Pair, number[]>
+);
 
   // buy ack waiters (req_id -> promise resolver)
   const buyAckWaitersRef = useRef<
@@ -226,8 +214,7 @@ export default function Dashboard() {
   // per-pair meta (for display + decision)
   const emptyMeta = Object.fromEntries(
   PAIRS.map((p) => [p, { count: 0 }])
-) as Record<Pair, { count: number; lowDigit?: number; lowPct?: number }>;
-
+) as unknown as Record<Pair, { count: number; lowDigit?: number; lowPct?: number }>;
 const [pairMeta, setPairMeta] = useState(emptyMeta);
 
   // ✅ left-side Profit/Loss box (same metric as MetroX trade history)
@@ -334,14 +321,13 @@ const [pairMeta, setPairMeta] = useState(emptyMeta);
     contractToReqRef.current = {};
     reqInfoRef.current = {};
 
-   pairDigitsRef.current = Object.fromEntries(PAIRS.map((p) => [p, []])) as Record<Pair, number[]>;
-    setPairMeta({
-      R_10: { count: 0 },
-      R_25: { count: 0 },
-      R_50: { count: 0 },
-      R_75: { count: 0 },
-      R_100: { count: 0 },
-    });
+   pairDigitsRef.current = Object.fromEntries(PAIRS.map((p) => [p, []])) as unknown as Record<Pair, number[]>;
+    setPairMeta(
+  Object.fromEntries(PAIRS.map((p) => [p, { count: 0 }])) as unknown as Record<
+    Pair,
+    { count: number; lowDigit?: number; lowPct?: number }
+  >
+);
 
     setTicks([]);
     setSelectedDigit(null);
@@ -1170,21 +1156,6 @@ function MetroXPanel({
     ))}
   </optgroup>
 
-  <optgroup label="Jump Indices">
-    {INDEX_GROUPS.jump.map((s) => (
-      <option key={s.code} value={s.code}>
-        {s.label}
-      </option>
-    ))}
-  </optgroup>
-
-  <optgroup label="RD Indices">
-    {INDEX_GROUPS.rd.map((s) => (
-      <option key={s.code} value={s.code}>
-        {s.label}
-      </option>
-    ))}
-  </optgroup>
 </select>
         </div>
 
@@ -1408,11 +1379,9 @@ function MetroXPanel({
   const has20 = m.count >= 20;
 
   const label =
-    INDEX_GROUPS.volatility.find(x => x.code === p)?.label ||
-    INDEX_GROUPS.volatility_1s.find(x => x.code === p)?.label ||
-    INDEX_GROUPS.jump.find(x => x.code === p)?.label ||
-    INDEX_GROUPS.rd.find(x => x.code === p)?.label ||
-    p; // fallback
+  INDEX_GROUPS.volatility.find(x => x.code === p)?.label ||
+  INDEX_GROUPS.volatility_1s.find(x => x.code === p)?.label ||
+  p;
 
   return (
     <div
