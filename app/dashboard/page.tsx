@@ -318,37 +318,37 @@ export default function DashboardPage() {
 
       {/* MAIN PANEL */}
       <MetroXPanel
-        ticks={ticks}
-        pipSize={pipSize}
-        stake={stake}
-        setStake={setStake}
-        selectedDigit={selectedDigit}
-        setSelectedDigit={setSelectedDigit}
-        selectedPair={selectedPair}
-        setSelectedPair={setSelectedPair}
-        mdTradeType={mdTradeType}
-        setMdTradeType={setMdTradeType}
-        mdTickDuration={mdTickDuration}
-        setMdTickDuration={setMdTickDuration}
-        onPlaceMetroX={() => placeTrade(mdTradeType, mdTickDuration)}
-        on3xSelectedDigit={on3xSelectedDigit}
-        instant3xRunning={instant3xRunning}
-        turboMode={turboMode}
-        setTurboMode={setTurboMode}
-        onToggle5x={toggle5x}
-        auto5xRunning={auto5xRunning}
-        analysisStatus={analysisStatus}
-        lastWinDigit={lastWinDigit}
-        lastLossDigit={lastLossDigit}
-        tradeHistory={tradeHistory}
-        onClearHistory={clearHistory}
-        currency={currency}
-        intelligentEnabled={intelligentEnabled}
-        setIntelligentEnabled={setIntelligentEnabled}
-        intelligentDigits={intelligentDigits}
-        intelligentLeastDigit={intelligentLeastDigit}
-        intelligentTotal={intelligentTotal}
-      />
+    ticks={ticks}
+    pipSize={pipSize}
+    stake={stake}
+    setStake={setStake}
+    selectedDigit={selectedDigit}
+    setSelectedDigit={setSelectedDigit}
+    selectedPair={selectedPair}
+    setSelectedPair={setSelectedPair}
+    mdTradeType={mdTradeType}
+    setMdTradeType={setMdTradeType}
+    mdTickDuration={mdTickDuration}
+    setMdTickDuration={setMdTickDuration}
+    onPlaceMetroX={() => placeTrade(mdTradeType, mdTickDuration)}
+    on3xSelectedDigit={on3xSelectedDigit}
+    instant3xRunning={instant3xRunning}
+    turboMode={turboMode}
+    setTurboMode={setTurboMode}
+    onToggle5x={toggle5x}
+    auto5xRunning={auto5xRunning}
+    analysisStatus={analysisStatus}
+    lastWinDigit={lastWinDigit}
+    lastLossDigit={lastLossDigit}
+    tradeHistory={tradeHistory}
+    onClearHistory={clearHistory}
+    currency={currency}
+    intelligentEnabled={intelligentEnabled}
+    setIntelligentEnabled={setIntelligentEnabled}
+    intelligentDigits={intelligentDigits}
+    intelligentLeastDigit={intelligentLeastDigit}
+    intelligentTotal={intelligentTotal}
+/>
     </div>
   );
 }
