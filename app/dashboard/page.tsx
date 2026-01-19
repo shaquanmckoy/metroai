@@ -3,11 +3,9 @@
 import React, { useState, useEffect, useRef, useMemo } from "react";
 import MetroXPanel from "./components/MetroXPanel";
 import { useRouter } from "next/navigation";
+import { PAIRS, Pair } from "./_pairs";   // ✅ FIXED IMPORT
 
-/* -------------------- CONSTANTS -------------------- */
-
-export const PAIRS = ["R_10", "R_25", "R_50", "R_75", "R_100"] as const;
-export type Pair = (typeof PAIRS)[number];
+/* -------------------- TYPES -------------------- */
 
 type TradeResult = "Win" | "Loss" | "Pending";
 type TradeType = "Matches" | "Differs";
@@ -108,6 +106,7 @@ export default function DashboardPage() {
   const flashDigit = (digit: number, win: boolean) => {
     setLastWinDigit(win ? digit : null);
     setLastLossDigit(!win ? digit : null);
+
     setTimeout(() => {
       setLastWinDigit(null);
       setLastLossDigit(null);
@@ -158,7 +157,7 @@ export default function DashboardPage() {
     return best;
   }, [intelligentDigits, intelligentTotal]);
 
-  /* -------------------- WEBSOCKET SAFE SEND -------------------- */
+  /* -------------------- SAFE SEND -------------------- */
 
   const safeSend = (obj: any) => {
     const ws = wsRef.current;
@@ -178,7 +177,7 @@ export default function DashboardPage() {
   ================================================================== */
 
   const connectDeriv = () => {
-    if (!token) return alert("Enter Deriv API token");
+    if (!token) return alert("Enter Deriv API Token");
 
     wsRef.current?.close();
     wsRef.current = new WebSocket(
@@ -216,17 +215,13 @@ export default function DashboardPage() {
 
         const digit = getLastDigit(quote);
 
-        // Update cached rolling array
         const arr = digitsCache.current[symbol];
         arr.push(digit);
         if (arr.length > 200) arr.shift();
 
-        // Only update ticks for selected pair
         if (symbol === selectedPair) {
-          setTicks([...arr]);
+          setTicks([...arr]); // keep the same reference shape
         }
-
-        // ❌ DO NOT clear selectedDigit (this caused React error #310)
       }
 
       /* ---------------- OPEN CONTRACT ---------------- */
@@ -289,9 +284,9 @@ export default function DashboardPage() {
 
   const placeTrade = (type: TradeType, duration: number) => {
     if (!connected || !authorizedRef.current)
-      return alert("Not connected");
+      return alert("Not connected to Deriv");
 
-    if (selectedDigit === null) return alert("Select digit");
+    if (selectedDigit === null) return alert("Select a digit");
 
     const req_id = newReqId();
 
@@ -325,8 +320,8 @@ export default function DashboardPage() {
 
   const on3xSelectedDigit = () => {
     if (instant3xRunning) return;
-
     setInstant3xRunning(true);
+
     let count = 0;
 
     const run = async () => {
@@ -375,15 +370,15 @@ export default function DashboardPage() {
                 className="bg-black/40 px-3 py-2 rounded-md border border-white/20"
                 onChange={(e) => setToken(e.target.value)}
               />
-              <button
-                onClick={connectDeriv}
-                className="bg-indigo-500 px-4 py-2 rounded-md"
-              >
+              <button onClick={connectDeriv} className="bg-indigo-500 px-4 py-2 rounded-md">
                 Connect
               </button>
             </>
           ) : (
-            <button onClick={disconnect} className="bg-red-500 px-4 py-2 rounded-md">
+            <button
+              onClick={disconnect}
+              className="bg-red-500 px-4 py-2 rounded-md"
+            >
               Disconnect
             </button>
           )}

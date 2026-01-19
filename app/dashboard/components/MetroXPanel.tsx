@@ -1,7 +1,7 @@
 "use client";
 
 import React from "react";
-import { PAIRS, Pair } from "../page";
+import { PAIRS, Pair } from "../_pairs"; // ✅ FIXED IMPORT
 
 type Trade = {
   id: number;
@@ -322,7 +322,9 @@ export default function MetroXPanel({
                 <br />
                 Profit:{" "}
                 {t.profit !== undefined
-                  ? `${t.profit >= 0 ? "+" : ""}${t.profit.toFixed(2)} ${currency}`
+                  ? `${t.profit >= 0 ? "+" : ""}${t.profit.toFixed(
+                      2
+                    )} ${currency}`
                   : "-"}
               </div>
             </div>
