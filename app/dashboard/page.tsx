@@ -1,9 +1,9 @@
 "use client";
 
 import React, { useState, useEffect, useRef, useMemo } from "react";
-import MetroXPanel from "./components/MetroXPanel";
 import { useRouter } from "next/navigation";
-import { PAIRS, Pair } from "./_pairs";   // ✅ FIXED IMPORT
+import MetroXPanel from "./components/MetroXPanel";
+import { PAIRS, Pair } from "./_pairs";
 
 /* -------------------- TYPES -------------------- */
 
@@ -27,7 +27,7 @@ type Trade = {
 const APP_ID = 1089;
 
 /* ================================================================
-   DASHBOARD COMPONENT
+   DASHBOARD PAGE
 ================================================================ */
 
 export default function DashboardPage() {
@@ -54,7 +54,7 @@ export default function DashboardPage() {
     );
   }
 
-  /* -------------------- CONNECTION -------------------- */
+  /* -------------------- STATE -------------------- */
 
   const wsRef = useRef<WebSocket | null>(null);
   const authorizedRef = useRef(false);
@@ -65,14 +65,10 @@ export default function DashboardPage() {
   const [balance, setBalance] = useState<number | null>(null);
   const [currency, setCurrency] = useState("USD");
 
-  /* -------------------- TICKS -------------------- */
-
   const [ticks, setTicks] = useState<number[]>([]);
   const [pipSize] = useState(2);
 
   const [selectedPair, setSelectedPair] = useState<Pair>("R_10");
-
-  // rolling cache per pair
   const digitsCache = useRef<Record<Pair, number[]>>({
     R_10: [],
     R_25: [],
@@ -81,24 +77,16 @@ export default function DashboardPage() {
     R_100: [],
   });
 
-  /* -------------------- DIGITS + STAKE -------------------- */
-
   const [stake, setStake] = useState<number>(1);
   const [selectedDigit, setSelectedDigit] = useState<number | null>(null);
-
-  /* -------------------- TRADE SETTINGS -------------------- */
 
   const [mdTradeType, setMdTradeType] =
     useState<"Differs" | "Matches">("Differs");
 
   const [mdTickDuration, setMdTickDuration] = useState<number>(1);
 
-  /* -------------------- HISTORY -------------------- */
-
   const [tradeHistory, setTradeHistory] = useState<Trade[]>([]);
   const clearHistory = () => setTradeHistory([]);
-
-  /* -------------------- WIN/LOSS FLASH -------------------- */
 
   const [lastWinDigit, setLastWinDigit] = useState<number | null>(null);
   const [lastLossDigit, setLastLossDigit] = useState<number | null>(null);
@@ -113,22 +101,16 @@ export default function DashboardPage() {
     }, 2000);
   };
 
-  /* -------------------- AUTO MODES -------------------- */
-
   const [instant3xRunning, setInstant3xRunning] = useState(false);
   const [auto5xRunning, setAuto5xRunning] = useState(false);
   const [turboMode, setTurboMode] = useState(false);
   const [analysisStatus, setAnalysisStatus] = useState("");
 
-  /* -------------------- INTELLIGENT DIFFERS -------------------- */
-
   const [intelligentEnabled, setIntelligentEnabled] = useState(false);
   const [intelligentStartIndex, setIntelligentStartIndex] = useState(0);
 
   useEffect(() => {
-    if (intelligentEnabled) {
-      setIntelligentStartIndex(ticks.length);
-    }
+    if (intelligentEnabled) setIntelligentStartIndex(ticks.length);
   }, [intelligentEnabled]);
 
   const intelligentDigits = useMemo(() => {
@@ -138,26 +120,24 @@ export default function DashboardPage() {
 
   const intelligentTotal = intelligentDigits.length;
 
+  /* -------------------- FIXED intelligentLeastDigit -------------------- */
+
   const intelligentLeastDigit = useMemo(() => {
     if (intelligentTotal < 20) return null;
 
     const count = Array.from({ length: 10 }, () => 0);
-    intelligentDigits.forEach((d) => count[d]++);
 
-    let best = 0;
-    let lowest = count[0];
+    intelligentDigits.forEach((d) => {
+      if (d >= 0 && d <= 9) count[d]++;
+    });
 
-    for (let i = 1; i < 10; i++) {
-      if (count[i] < lowest) {
-        lowest = count[i];
-        best = i;
-      }
-    }
+    const min = Math.min(...count);
+    const idx = count.indexOf(min);
 
-    return best;
+    return idx >= 0 ? idx : null;
   }, [intelligentDigits, intelligentTotal]);
 
-  /* -------------------- SAFE SEND -------------------- */
+  /* -------------------- HELPERS -------------------- */
 
   const safeSend = (obj: any) => {
     const ws = wsRef.current;
@@ -167,26 +147,25 @@ export default function DashboardPage() {
 
   const newReqId = () => Date.now() + Math.floor(Math.random() * 1000);
 
-  const getLastDigit = (quote: number): number => {
+  const getLastDigit = (quote: number) => {
     const fixed = quote.toFixed(pipSize).replace(".", "");
     return Number(fixed[fixed.length - 1]);
   };
 
   /* ================================================================
-     CONNECT TO DERIV
+     WEBSOCKET CONNECTION
   ================================================================== */
 
   const connectDeriv = () => {
     if (!token) return alert("Enter Deriv API Token");
 
     wsRef.current?.close();
+
     wsRef.current = new WebSocket(
       `wss://ws.derivws.com/websockets/v3?app_id=${APP_ID}`
     );
 
-    wsRef.current.onopen = () => {
-      safeSend({ authorize: token });
-    };
+    wsRef.current.onopen = () => safeSend({ authorize: token });
 
     wsRef.current.onmessage = (e) => {
       const msg = JSON.parse(e.data);
@@ -211,28 +190,25 @@ export default function DashboardPage() {
 
       if (msg.msg_type === "tick") {
         const symbol = msg.tick.symbol as Pair;
-        const quote = msg.tick.quote;
-
-        const digit = getLastDigit(quote);
+        const digit = getLastDigit(msg.tick.quote);
 
         const arr = digitsCache.current[symbol];
         arr.push(digit);
         if (arr.length > 200) arr.shift();
 
         if (symbol === selectedPair) {
-          setTicks([...arr]); // keep the same reference shape
+          setTicks([...arr]); // valid state update
         }
       }
 
-      /* ---------------- OPEN CONTRACT ---------------- */
+      /* ---- TRADE SETTLEMENT ---- */
 
       if (msg.msg_type === "proposal_open_contract") {
         const poc = msg.proposal_open_contract;
 
         if (!poc.is_sold) return;
 
-        const contractId = poc.contract_id;
-        const tradeRef = tradesRef.current[contractId];
+        const tradeRef = tradesRef.current[poc.contract_id];
         if (!tradeRef) return;
 
         const finalDigit = getLastDigit(poc.exit_spot);
@@ -254,14 +230,13 @@ export default function DashboardPage() {
           )
         );
 
-        delete tradesRef.current[contractId];
+        delete tradesRef.current[poc.contract_id];
       }
 
-      /* ---------------- BUY RESPONSE ---------------- */
+      /* ---- BUY RESPONSE ---- */
 
       if (msg.msg_type === "buy") {
-        const contractId = msg.buy.contract_id;
-        tradesRef.current[contractId] = { req_id: msg.req_id };
+        tradesRef.current[msg.buy.contract_id] = { req_id: msg.req_id };
       }
     };
 
@@ -274,8 +249,8 @@ export default function DashboardPage() {
 
   const disconnect = () => {
     wsRef.current?.close();
-    setConnected(false);
     authorizedRef.current = false;
+    setConnected(false);
   };
 
   /* -------------------- PLACE TRADE -------------------- */
@@ -284,7 +259,7 @@ export default function DashboardPage() {
 
   const placeTrade = (type: TradeType, duration: number) => {
     if (!connected || !authorizedRef.current)
-      return alert("Not connected to Deriv");
+      return alert("Not connected");
 
     if (selectedDigit === null) return alert("Select a digit");
 
@@ -298,8 +273,8 @@ export default function DashboardPage() {
         type,
         stake,
         durationTicks: duration,
-        result: "Pending",
         createdAt: Date.now(),
+        result: "Pending",
       },
       ...prev,
     ]);
@@ -320,11 +295,11 @@ export default function DashboardPage() {
 
   const on3xSelectedDigit = () => {
     if (instant3xRunning) return;
-    setInstant3xRunning(true);
 
+    setInstant3xRunning(true);
     let count = 0;
 
-    const run = async () => {
+    const cycle = async () => {
       try {
         while (count < 3) {
           placeTrade("Differs", mdTickDuration);
@@ -336,18 +311,18 @@ export default function DashboardPage() {
       }
     };
 
-    run();
+    cycle();
   };
 
   const toggle5x = () => {
     setAuto5xRunning(!auto5xRunning);
     setAnalysisStatus(
-      auto5xRunning ? "Stopped." : "AutoTrading logic not implemented."
+      auto5xRunning ? "Stopped." : "Auto trading logic not implemented."
     );
   };
 
   /* ================================================================
-     RENDER UI
+     UI RENDER
   ================================================================== */
 
   return (
@@ -367,10 +342,13 @@ export default function DashboardPage() {
               <input
                 type="password"
                 placeholder="API Token"
-                className="bg-black/40 px-3 py-2 rounded-md border border-white/20"
                 onChange={(e) => setToken(e.target.value)}
+                className="bg-black/40 px-3 py-2 rounded-md border border-white/20"
               />
-              <button onClick={connectDeriv} className="bg-indigo-500 px-4 py-2 rounded-md">
+              <button
+                onClick={connectDeriv}
+                className="bg-indigo-500 px-4 py-2 rounded-md"
+              >
                 Connect
               </button>
             </>

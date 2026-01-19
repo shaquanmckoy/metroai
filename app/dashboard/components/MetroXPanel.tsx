@@ -1,7 +1,7 @@
 "use client";
 
 import React from "react";
-import { PAIRS, Pair } from "../_pairs"; // ✅ FIXED IMPORT
+import { PAIRS, Pair } from "../_pairs";
 
 type Trade = {
   id: number;
@@ -17,38 +17,7 @@ type Trade = {
   settlementDigit?: number;
 };
 
-export default function MetroXPanel({
-  ticks,
-  pipSize,
-  stake,
-  setStake,
-  selectedDigit,
-  setSelectedDigit,
-  selectedPair,
-  setSelectedPair,
-  mdTradeType,
-  setMdTradeType,
-  mdTickDuration,
-  setMdTickDuration,
-  onPlaceMetroX,
-  on3xSelectedDigit,
-  instant3xRunning,
-  turboMode,
-  setTurboMode,
-  onToggle5x,
-  auto5xRunning,
-  analysisStatus,
-  lastWinDigit,
-  lastLossDigit,
-  tradeHistory,
-  onClearHistory,
-  currency,
-  intelligentEnabled,
-  setIntelligentEnabled,
-  intelligentDigits,
-  intelligentLeastDigit,
-  intelligentTotal,
-}: {
+interface MetroXPanelProps {
   ticks: number[];
   pipSize: number;
 
@@ -92,28 +61,58 @@ export default function MetroXPanel({
   intelligentDigits: number[];
   intelligentLeastDigit: number | null;
   intelligentTotal: number;
-}) {
+}
+
+export default function MetroXPanel({
+  ticks,
+  pipSize,
+  stake,
+  setStake,
+  selectedDigit,
+  setSelectedDigit,
+  selectedPair,
+  setSelectedPair,
+  mdTradeType,
+  setMdTradeType,
+  mdTickDuration,
+  setMdTickDuration,
+  onPlaceMetroX,
+  on3xSelectedDigit,
+  instant3xRunning,
+  turboMode,
+  setTurboMode,
+  onToggle5x,
+  auto5xRunning,
+  analysisStatus,
+  lastWinDigit,
+  lastLossDigit,
+  tradeHistory,
+  onClearHistory,
+  currency,
+  intelligentEnabled,
+  setIntelligentEnabled,
+  intelligentDigits,
+  intelligentLeastDigit,
+  intelligentTotal,
+}: MetroXPanelProps) {
   /* ------------------ % CALCULATIONS ------------------ */
 
   const digitPercent = (d: number): number => {
     if (!ticks.length) return 0;
-    return (ticks.filter((x) => x === d).length / ticks.length) * 100;
+    return (ticks.filter((x: number) => x === d).length / ticks.length) * 100;
   };
 
   const HIGH_PCT = 13.0;
+  const lastDigit = ticks.length > 0 ? ticks[ticks.length - 1] : null;
 
-  const lastDigit: number | null =
-    ticks.length > 0 ? (ticks[ticks.length - 1] as number) : null;
-
-  /* ------------------ DIGITS GRID ------------------ */
-
-  const digits: number[] = Array.from({ length: 10 }, (_, i) => i);
+  const digits = Array.from({ length: 10 }, (_, i) => i);
 
   return (
     <div className="bg-gradient-to-br from-[#1b2235]/95 to-[#121826]/95 p-6 min-h-[520px]">
 
       {/* ======================== TOP SETTINGS ======================== */}
       <div className="grid grid-cols-2 gap-3 mb-4">
+        {/* Pair Selector */}
         <div>
           <p className="text-[11px] text-white/60 mb-1">Select Index</p>
           <select
@@ -121,7 +120,7 @@ export default function MetroXPanel({
             value={selectedPair}
             onChange={(e) => setSelectedPair(e.target.value as Pair)}
           >
-            {PAIRS.map((p: Pair) => (
+            {PAIRS.map((p) => (
               <option key={p} value={p}>
                 {p}
               </option>
@@ -129,6 +128,7 @@ export default function MetroXPanel({
           </select>
         </div>
 
+        {/* Stake */}
         <div>
           <p className="text-[11px] text-white/60 mb-1">Stake Amount</p>
           <input
@@ -163,6 +163,7 @@ export default function MetroXPanel({
 
         {intelligentEnabled && (
           <div className="mt-3 text-xs text-white/70">
+
             <p>
               Recent Digits ({intelligentTotal}):{" "}
               <span className="text-emerald-300 font-semibold tracking-widest">
@@ -191,12 +192,11 @@ export default function MetroXPanel({
 
       {/* ======================== DIGITS GRID ======================== */}
       <p className="text-sm text-white/80 mb-2">
-        Select digit for{" "}
-        <span className="font-semibold">{mdTradeType.toUpperCase()}</span> trade
+        Select digit for <span className="font-semibold">{mdTradeType}</span>
       </p>
 
       <div className="grid grid-cols-5 gap-3">
-        {digits.map((d: number) => {
+        {digits.map((d) => {
           const pct = digitPercent(d);
           const isSelected = selectedDigit === d;
           const isHigh = pct >= HIGH_PCT;
@@ -297,7 +297,7 @@ export default function MetroXPanel({
         </div>
 
         <div className="max-h-72 overflow-y-auto space-y-2 pr-1">
-          {tradeHistory.map((t: Trade) => (
+          {tradeHistory.map((t) => (
             <div
               key={t.id}
               className="bg-white/5 border border-white/10 rounded-lg p-3 text-xs text-white/70"
@@ -322,9 +322,7 @@ export default function MetroXPanel({
                 <br />
                 Profit:{" "}
                 {t.profit !== undefined
-                  ? `${t.profit >= 0 ? "+" : ""}${t.profit.toFixed(
-                      2
-                    )} ${currency}`
+                  ? `${t.profit >= 0 ? "+" : ""}${t.profit.toFixed(2)} ${currency}`
                   : "-"}
               </div>
             </div>
