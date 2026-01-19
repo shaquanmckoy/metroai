@@ -201,7 +201,6 @@ export default function DashboardPage() {
 
         if (symbol === selectedPair) {
           setTicks([...arr]);
-          setSelectedDigit(null);
         }
       }
 
