@@ -1,25 +1,17 @@
 "use client";
 
-import React, { useEffect, useMemo, useRef, useState } from "react";
-import { useRouter } from "next/navigation";
+import React, { useState, useEffect, useRef, useMemo } from "react";
 import MetroXPanel from "./components/MetroXPanel";
-import StrategyPanel from "./components/StrategyPanel";
-import StrategyRow from "./components/StrategyRow";
-import TradeHistoryMetroLike from "./components/TradeHistoryMetroLike";
-
-/* --------------------------------------------
-   CONSTANTS AND INDEX GROUPS
--------------------------------------------- */
+import { useRouter } from "next/navigation";
 
 export const PAIRS = ["R_10", "R_25", "R_50", "R_75", "R_100"] as const;
 export type Pair = (typeof PAIRS)[number];
 
-export type TradeType = "Matches" | "Differs" | "Over" | "Under";
-export type TradeResult = "Win" | "Loss" | "Pending";
+type TradeResult = "Win" | "Loss" | "Pending";
+type TradeType = "Matches" | "Differs" | "Over" | "Under";
 
-export type Trade = {
+type Trade = {
   id: number;
-  contract_id?: number;
   symbol: Pair;
   digit: number;
   type: TradeType;
@@ -32,204 +24,388 @@ export type Trade = {
   createdAt: number;
 };
 
-/* --------------------------------------------
-   PAGE COMPONENT START
--------------------------------------------- */
+const APP_ID = 1089;
 
-export default function Dashboard() {
+export default function DashboardPage() {
   const router = useRouter();
 
+  /* -------------------- AUTH -------------------- */
+  const [authChecked, setAuthChecked] = useState(false);
+
+  useEffect(() => {
+    const logged = localStorage.getItem("loggedIn") === "true";
+    if (!logged) {
+      router.replace("/");
+      return;
+    }
+    setAuthChecked(true);
+  }, []);
+
+  if (!authChecked)
+    return (
+      <main className="min-h-screen flex items-center justify-center text-white">
+        Loading...
+      </main>
+    );
+
+  /* -------------------- CONNECTION -------------------- */
   const wsRef = useRef<WebSocket | null>(null);
+  const authorizedRef = useRef(false);
 
-  /* -------- STATE -------- */
-
-  const [connected, setConnected] = useState(false);
   const [token, setToken] = useState("");
-
-  const [selectedPair, setSelectedPair] = useState<Pair>("R_10");
-  const [activeStrategy, setActiveStrategy] = useState<"matches" | "overunder" | null>(null);
-
-  const [stake, setStake] = useState(1);
-  const [selectedDigit, setSelectedDigit] = useState<number | null>(null);
-  const [mdTradeType, setMdTradeType] = useState<"Matches" | "Differs">("Differs");
-  const [mdTickDuration, setMdTickDuration] = useState(1);
+  const [connected, setConnected] = useState(false);
 
   const [balance, setBalance] = useState<number | null>(null);
   const [currency, setCurrency] = useState("USD");
 
+  /* -------------------- TICKS + META -------------------- */
   const [ticks, setTicks] = useState<number[]>([]);
-  const [tradeHistoryMatches, setTradeHistoryMatches] = useState<Trade[]>([]);
-  const [tradeHistoryOverUnder, setTradeHistoryOverUnder] = useState<Trade[]>([]);
+  const [pipSize, setPipSize] = useState(2);
 
-  const [instant3xRunning, setInstant3xRunning] = useState(false);
-  const [auto5xRunning, setAuto5xRunning] = useState(false);
-  const [auto1xRunning, setAuto1xRunning] = useState(false);
+  const [selectedPair, setSelectedPair] = useState<Pair>("R_10");
 
-  const [analysisStatus, setAnalysisStatus] = useState("");
-  const [analysisOpen, setAnalysisOpen] = useState(false);
+  // Per-pair rolling cache
+  const digitsCache = useRef<Record<Pair, number[]>>({
+    R_10: [],
+    R_25: [],
+    R_50: [],
+    R_75: [],
+    R_100: [],
+  });
 
+  /* -------------------- DIGIT + STAKE -------------------- */
+  const [stake, setStake] = useState<number>(1);
+  const [selectedDigit, setSelectedDigit] = useState<number | null>(null);
+
+  /* -------------------- METROX SETTINGS -------------------- */
+  const [mdTradeType, setMdTradeType] = useState<"Differs" | "Matches">("Differs");
+  const [mdTickDuration, setMdTickDuration] = useState<number>(1);
+
+  /* -------------------- TRADE HISTORY -------------------- */
+  const [tradeHistory, setTradeHistory] = useState<Trade[]>([]);
+
+  const clearHistory = () => setTradeHistory([]);
+
+  /* -------------------- WIN/LOSS FLASH -------------------- */
   const [lastWinDigit, setLastWinDigit] = useState<number | null>(null);
   const [lastLossDigit, setLastLossDigit] = useState<number | null>(null);
 
-  const [pipSize, setPipSize] = useState(2);
-  const [metroXResetKey, setMetroXResetKey] = useState(0);
+  const flashDigit = (digit: number, win: boolean) => {
+    setLastWinDigit(win ? digit : null);
+    setLastLossDigit(!win ? digit : null);
 
-  /* --------------------------------------------
-     UI RETURN — CLEAN & ERROR-FREE
-  -------------------------------------------- */
+    setTimeout(() => {
+      setLastWinDigit(null);
+      setLastLossDigit(null);
+    }, 2000);
+  };
+
+  /* -------------------- AUTO MODES -------------------- */
+  const [instant3xRunning, setInstant3xRunning] = useState(false);
+  const [auto5xRunning, setAuto5xRunning] = useState(false);
+  const [turboMode, setTurboMode] = useState(false);
+  const [analysisStatus, setAnalysisStatus] = useState("");
+
+  /* -------------------- INTELLIGENT DIFFERS -------------------- */
+  const [intelligentEnabled, setIntelligentEnabled] = useState(false);
+  const [intelligentStartIndex, setIntelligentStartIndex] = useState(0);
+
+  useEffect(() => {
+    if (intelligentEnabled) {
+      setIntelligentStartIndex(ticks.length);
+    }
+  }, [intelligentEnabled]);
+
+  const intelligentDigits = useMemo(() => {
+    const start = Math.min(intelligentStartIndex, ticks.length);
+    return ticks.slice(start);
+  }, [ticks, intelligentStartIndex]);
+
+  const intelligentTotal = intelligentDigits.length;
+
+  const intelligentLeastDigit = useMemo(() => {
+    if (intelligentTotal < 20) return null;
+
+    const count = Array.from({ length: 10 }, () => 0);
+    intelligentDigits.forEach((d) => count[d]++);
+
+    let best = 0;
+    let lowest = count[0];
+    for (let i = 1; i < 10; i++) {
+      if (count[i] < lowest) {
+        lowest = count[i];
+        best = i;
+      }
+    }
+    return best;
+  }, [intelligentDigits, intelligentTotal]);
+
+  /* -------------------- CONNECT DERIV -------------------- */
+
+  const safeSend = (obj: any) => {
+    const ws = wsRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    ws.send(JSON.stringify(obj));
+  };
+
+  const newReqId = () => Date.now() + Math.floor(Math.random() * 1000);
+
+  const getLastDigit = (quote: number): number => {
+    const fixed = quote.toFixed(pipSize).replace(".", "");
+    return Number(fixed[fixed.length - 1]);
+  };
+
+  const connectDeriv = () => {
+    if (!token) return alert("Enter Deriv API Token");
+
+    wsRef.current?.close();
+    wsRef.current = new WebSocket(
+      `wss://ws.derivws.com/websockets/v3?app_id=${APP_ID}`
+    );
+
+    wsRef.current.onopen = () => {
+      safeSend({ authorize: token });
+    };
+
+    wsRef.current.onmessage = (e) => {
+      const msg = JSON.parse(e.data);
+
+      if (msg.error) {
+        alert(msg.error.message);
+        return;
+      }
+
+      if (msg.msg_type === "authorize") {
+        authorizedRef.current = true;
+        setConnected(true);
+
+        safeSend({ balance: 1, subscribe: 1 });
+
+        PAIRS.forEach((p) => safeSend({ ticks: p, subscribe: 1 }));
+      }
+
+      if (msg.msg_type === "balance") {
+        setBalance(msg.balance.balance);
+        setCurrency(msg.balance.currency);
+      }
+
+      if (msg.msg_type === "tick") {
+        const symbol = msg.tick.symbol as Pair;
+        const quote = msg.tick.quote;
+
+        const digit = getLastDigit(quote);
+
+        const arr = digitsCache.current[symbol];
+        arr.push(digit);
+        if (arr.length > 200) arr.shift();
+
+        if (symbol === selectedPair) {
+          setTicks([...arr]);
+          setSelectedDigit(null);
+        }
+      }
+
+      if (msg.msg_type === "proposal_open_contract") {
+        const poc = msg.proposal_open_contract;
+        const contractId = poc.contract_id;
+
+        if (!poc.is_sold) return;
+
+        const req = tradesRef.current[contractId];
+        if (!req) return;
+
+        const finalDigit = getLastDigit(poc.exit_spot);
+
+        const result: TradeResult = poc.profit > 0 ? "Win" : "Loss";
+
+        flashDigit(finalDigit, result === "Win");
+
+        setTradeHistory((prev) =>
+          prev.map((t) =>
+            t.id === req.req_id
+              ? {
+                  ...t,
+                  result,
+                  profit: poc.profit,
+                  payout: poc.payout,
+                  settlementDigit: finalDigit,
+                }
+              : t
+          )
+        );
+
+        delete tradesRef.current[contractId];
+      }
+
+      if (msg.msg_type === "buy") {
+        const contractId = msg.buy.contract_id;
+        const reqId = msg.req_id;
+
+        tradesRef.current[contractId] = { req_id: reqId };
+      }
+    };
+
+    wsRef.current.onclose = () => {
+      setConnected(false);
+      setBalance(null);
+    };
+  };
+
+  const disconnect = () => {
+    wsRef.current?.close();
+    setConnected(false);
+    authorizedRef.current = false;
+  };
+
+  /* -------------------- PLACE TRADE -------------------- */
+
+  const tradesRef = useRef<Record<number, { req_id: number }>>({});
+
+  const placeTrade = (type: TradeType, duration: number) => {
+    if (!connected || !authorizedRef.current)
+      return alert("Not connected to Deriv");
+
+    if (selectedDigit === null) return alert("Select digit");
+
+    const req_id = newReqId();
+
+    setTradeHistory((prev) => [
+      {
+        id: req_id,
+        symbol: selectedPair,
+        digit: selectedDigit,
+        type,
+        stake,
+        durationTicks: duration,
+        result: "Pending",
+        createdAt: Date.now(),
+      },
+      ...prev,
+    ]);
+
+    safeSend({
+      proposal: 1,
+      amount: stake,
+      basis: "stake",
+      contract_type: type === "Differs" ? "DIGITDIFF" : "DIGITMATCH",
+      currency,
+      symbol: selectedPair,
+      duration,
+      duration_unit: "t",
+      barrier: String(selectedDigit),
+      req_id,
+    });
+  };
+
+  const on3xSelectedDigit = () => {
+    if (instant3xRunning) return;
+    setInstant3xRunning(true);
+
+    let count = 0;
+
+    const run = async () => {
+      try {
+        while (count < 3) {
+          placeTrade("Differs", mdTickDuration);
+          count++;
+          if (!turboMode) await new Promise((r) => setTimeout(r, 60));
+        }
+      } finally {
+        setInstant3xRunning(false);
+      }
+    };
+
+    run();
+  };
+
+  const toggle5x = () => {
+    setAuto5xRunning(!auto5xRunning);
+    setAnalysisStatus(
+      auto5xRunning ? "Stopped." : "AutoTrading logic not implemented here."
+    );
+  };
+
+  /* -------------------- RENDER -------------------- */
 
   return (
-    <div className="min-h-screen bg-gradient-to-b from-[#0f0f14] via-[#0b0c11] to-[#050507] text-white overflow-x-hidden">
+    <div className="min-h-screen bg-[#0b0c11] text-white p-6">
 
       {/* HEADER */}
-      <header className="w-full backdrop-blur-xl bg-white/5 border-b border-white/10 shadow sticky top-0 z-50">
-        <div className="max-w-7xl mx-auto px-6 py-4 flex items-center justify-between">
-          <h1 className="text-xl font-semibold">MetroAi Trading Analyzer</h1>
+      <div className="flex justify-between mb-6">
+        <h1 className="text-xl font-semibold">MetroX Trading Dashboard</h1>
 
-          <div className="flex items-center gap-4">
-            <span className="text-sm px-3 py-1 rounded-full bg-emerald-600/20 border border-emerald-500/30 text-emerald-300">
-              ● {connected ? "Connected" : "Disconnected"}
-            </span>
+        <div className="flex gap-2 items-center">
+          <span className="text-sm px-3 py-1 rounded-full bg-emerald-600/20 border border-emerald-400/30">
+            ● {connected ? "Connected" : "Disconnected"}
+          </span>
 
+          {!connected ? (
+            <>
+              <input
+                type="password"
+                placeholder="API Token"
+                className="bg-black/40 px-3 py-2 rounded-md border border-white/20"
+                onChange={(e) => setToken(e.target.value)}
+              />
+              <button
+                onClick={connectDeriv}
+                className="bg-indigo-500 px-4 py-2 rounded-md"
+              >
+                Connect
+              </button>
+            </>
+          ) : (
             <button
-              onClick={() => wsRef.current?.close()}
-              className="text-sm px-4 py-2 rounded-lg bg-red-600 hover:bg-red-700 shadow"
+              onClick={disconnect}
+              className="bg-red-500 px-4 py-2 rounded-md"
             >
               Disconnect
             </button>
-          </div>
-        </div>
-      </header>
-
-      {/* MAIN GRID */}
-      <section className="px-8 pb-8 grid grid-cols-1 lg:grid-cols-2 gap-6">
-
-        {/* LEFT PANEL */}
-        <div className="space-y-6">
-
-          {/* ACCOUNT BOX */}
-          <div className="bg-[#13233d]/80 p-6 rounded-2xl border border-white/10">
-            <h2 className="font-semibold mb-4">Deriv API Connection</h2>
-
-            <div className="grid grid-cols-2 lg:grid-cols-3 gap-4 text-sm">
-              <div className="bg-black/30 p-4 rounded-xl border border-white/10">
-                <p className="text-gray-400">Account Status</p>
-                <p className="font-semibold text-green-400">
-                  {connected ? "Connected" : "Disconnected"}
-                </p>
-              </div>
-
-              <div className="bg-black/30 p-4 rounded-xl border border-white/10">
-                <p className="text-gray-400">Account Balance</p>
-                <p className="font-semibold text-lg">
-                  {balance !== null ? `${balance.toFixed(2)} ${currency}` : "..."}
-                </p>
-              </div>
-            </div>
-          </div>
-
-          {/* STRATEGIES */}
-          <div className="bg-[#13233d]/80 p-6 rounded-2xl border border-white/10">
-            <h2 className="font-semibold mb-4">Trading Strategies</h2>
-
-            <StrategyRow
-              title="MetroX"
-              description="Matches/Differs strategy"
-              active={activeStrategy === "matches"}
-              onToggle={() =>
-                setActiveStrategy(activeStrategy === "matches" ? null : "matches")
-              }
-            />
-
-            <StrategyRow
-              title="Over / Under"
-              description="Digit threshold strategy"
-              active={activeStrategy === "overunder"}
-              onToggle={() =>
-                setActiveStrategy(activeStrategy === "overunder" ? null : "overunder")
-              }
-            />
-          </div>
-        </div>
-
-        {/* RIGHT PANEL */}
-        <div className="rounded-2xl border border-white/10 overflow-hidden shadow bg-[#0f1828]">
-
-          {/* METROX PANEL */}
-          {activeStrategy === "matches" && (
-  <MetroXPanel
-    key={metroXResetKey}
-    ticks={ticks}
-    pipSize={pipSize}
-    stake={stake}
-    setStake={setStake}
-    selectedDigit={selectedDigit}
-    setSelectedDigit={setSelectedDigit}
-
-    selectedPair={selectedPair}
-    setSelectedPair={setSelectedPair}  // ✔ only ONE
-
-    mdTradeType={mdTradeType}
-    setMdTradeType={setMdTradeType}
-    mdTickDuration={mdTickDuration}
-    setMdTickDuration={setMdTickDuration}
-
-    onPlaceMetroX={() => {}}
-    on3xSelectedDigit={() => {}}
-    instant3xRunning={instant3xRunning}
-
-    turboMode={false}
-    setTurboMode={() => {}}
-
-    onToggle5x={() => {}}
-    auto5xRunning={auto5xRunning}
-
-    analysisStatus={analysisStatus}
-    analysisOpen={analysisOpen}
-    setAnalysisOpen={setAnalysisOpen}
-
-    lastWinDigit={lastWinDigit}
-    lastLossDigit={lastLossDigit}
-    pairMeta={{}}
-
-    tradeHistory={tradeHistoryMatches}
-    onClearHistory={() => {}}
-
-    currency={currency}
-    run1xAutoAllPairs={() => {}}
-    auto1xRunning={auto1xRunning}
-  />
-)}
-
-          {/* OVER / UNDER PANEL */}
-          {activeStrategy === "overunder" && (
-            <div className="bg-[#13233d] p-6">
-              <StrategyPanel
-                type="overunder"
-                ticks={ticks}
-                selectedDigit={selectedDigit}
-                setSelectedDigit={setSelectedDigit}
-                stake={stake}
-                setStake={setStake}
-                selectedPair={selectedPair}
-                setSelectedPair={(p: string) =>
-                  setSelectedPair(p as Pair)   // ✅ FIXED ERROR HERE
-                }
-                tradeHistory={tradeHistoryOverUnder}
-                placeTrade={() => {}}
-              />
-            </div>
           )}
-
-          {/* EMPTY STATE */}
-          {!activeStrategy && (
-            <div className="bg-gradient-to-br from-[#1b2235] to-[#121826] p-6 min-h-[520px] flex items-center justify-center">
-              <p className="text-gray-300">Select a trading strategy to begin</p>
-            </div>
-          )}
-
         </div>
-      </section>
+      </div>
+
+      {/* BALANCE BOX */}
+      <div className="mb-6 bg-[#13233d]/60 p-4 rounded-xl border border-white/10">
+        <p className="text-sm text-white/70">Account Balance</p>
+        <p className="text-2xl font-bold mt-1">
+          {balance !== null ? `${balance.toFixed(2)} ${currency}` : "—"}
+        </p>
+      </div>
+
+      {/* PANEL */}
+      <MetroXPanel
+        ticks={ticks}
+        pipSize={pipSize}
+        stake={stake}
+        setStake={setStake}
+        selectedDigit={selectedDigit}
+        setSelectedDigit={setSelectedDigit}
+        selectedPair={selectedPair}
+        setSelectedPair={setSelectedPair}
+        mdTradeType={mdTradeType}
+        setMdTradeType={setMdTradeType}
+        mdTickDuration={mdTickDuration}
+        setMdTickDuration={setMdTickDuration}
+        onPlaceMetroX={() => placeTrade(mdTradeType, mdTickDuration)}
+        on3xSelectedDigit={on3xSelectedDigit}
+        instant3xRunning={instant3xRunning}
+        turboMode={turboMode}
+        setTurboMode={setTurboMode}
+        onToggle5x={toggle5x}
+        auto5xRunning={auto5xRunning}
+        analysisStatus={analysisStatus}
+        lastWinDigit={lastWinDigit}
+        lastLossDigit={lastLossDigit}
+        tradeHistory={tradeHistory}
+        onClearHistory={clearHistory}
+        currency={currency}
+        intelligentEnabled={intelligentEnabled}
+        setIntelligentEnabled={setIntelligentEnabled}
+        intelligentDigits={intelligentDigits}
+        intelligentLeastDigit={intelligentLeastDigit}
+        intelligentTotal={intelligentTotal}
+      />
     </div>
   );
 }
