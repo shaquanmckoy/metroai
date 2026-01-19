@@ -1,7 +1,7 @@
 "use client";
 
 import React from "react";
-import { PAIRS, Pair } from "../_pairs";
+import { PAIRS, Pair } from "../pairs";
 
 type Trade = {
   id: number;

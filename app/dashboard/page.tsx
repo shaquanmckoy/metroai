@@ -3,7 +3,7 @@
 import React, { useState, useEffect, useRef, useMemo } from "react";
 import { useRouter } from "next/navigation";
 import MetroXPanel from "./components/MetroXPanel";
-import { PAIRS, Pair } from "./_pairs"; // SAFE import
+import { PAIRS, Pair } from "./pairs"; // SAFE import
 
 /* TYPES */
 type TradeResult = "Win" | "Loss" | "Pending";
