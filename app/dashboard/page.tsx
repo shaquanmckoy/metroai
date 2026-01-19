@@ -3,9 +3,10 @@
 import React, { useState, useEffect, useRef, useMemo } from "react";
 import { useRouter } from "next/navigation";
 import MetroXPanel from "./components/MetroXPanel";
-import { PAIRS, Pair } from "./pairs"; // SAFE import
+import { PAIRS, Pair } from "./pairs";   // ✅ FIXED — safe import
 
-/* TYPES */
+/* -------------------- TYPES -------------------- */
+
 type TradeResult = "Win" | "Loss" | "Pending";
 type TradeType = "Matches" | "Differs";
 
@@ -32,29 +33,28 @@ const APP_ID = 1089;
 export default function DashboardPage() {
   const router = useRouter();
 
-  /* ---------------- AUTH CHECK ---------------- */
+  /* -------------------- AUTH CHECK -------------------- */
 
   const [authChecked, setAuthChecked] = useState(false);
 
   useEffect(() => {
     const logged = localStorage.getItem("loggedIn") === "true";
-
     if (!logged) {
       router.replace("/");
       return;
     }
-
     setAuthChecked(true);
   }, []);
 
-  if (!authChecked)
+  if (!authChecked) {
     return (
       <main className="min-h-screen flex items-center justify-center text-white">
         Loading...
       </main>
     );
+  }
 
-  /* ---------------- CONNECTION ---------------- */
+  /* -------------------- STATE -------------------- */
 
   const wsRef = useRef<WebSocket | null>(null);
   const authorizedRef = useRef(false);
@@ -65,10 +65,8 @@ export default function DashboardPage() {
   const [balance, setBalance] = useState<number | null>(null);
   const [currency, setCurrency] = useState("USD");
 
-  /* ---------------- TICKS ---------------- */
-
   const [ticks, setTicks] = useState<number[]>([]);
-  const pipSize = 2;
+  const [pipSize] = useState(2);
 
   const [selectedPair, setSelectedPair] = useState<Pair>("R_10");
 
@@ -80,24 +78,16 @@ export default function DashboardPage() {
     R_100: [],
   });
 
-  /* ---------------- DIGITS + STAKE ---------------- */
-
-  const [stake, setStake] = useState(1);
+  const [stake, setStake] = useState<number>(1);
   const [selectedDigit, setSelectedDigit] = useState<number | null>(null);
 
-  /* ---------------- METROX SETTINGS ---------------- */
-
   const [mdTradeType, setMdTradeType] =
-    useState<TradeType>("Differs");
+    useState<"Differs" | "Matches">("Differs");
 
-  const [mdTickDuration, setMdTickDuration] = useState(1);
-
-  /* ---------------- HISTORY ---------------- */
+  const [mdTickDuration, setMdTickDuration] = useState<number>(1);
 
   const [tradeHistory, setTradeHistory] = useState<Trade[]>([]);
   const clearHistory = () => setTradeHistory([]);
-
-  /* ---------------- WIN/LOSS FLASH ---------------- */
 
   const [lastWinDigit, setLastWinDigit] = useState<number | null>(null);
   const [lastLossDigit, setLastLossDigit] = useState<number | null>(null);
@@ -112,22 +102,16 @@ export default function DashboardPage() {
     }, 2000);
   };
 
-  /* ---------------- AUTO FEATURES ---------------- */
-
   const [instant3xRunning, setInstant3xRunning] = useState(false);
   const [auto5xRunning, setAuto5xRunning] = useState(false);
   const [turboMode, setTurboMode] = useState(false);
   const [analysisStatus, setAnalysisStatus] = useState("");
 
-  /* ---------------- INTELLIGENT DIFFERS ---------------- */
-
   const [intelligentEnabled, setIntelligentEnabled] = useState(false);
   const [intelligentStartIndex, setIntelligentStartIndex] = useState(0);
 
   useEffect(() => {
-    if (intelligentEnabled) {
-      setIntelligentStartIndex(ticks.length);
-    }
+    if (intelligentEnabled) setIntelligentStartIndex(ticks.length);
   }, [intelligentEnabled]);
 
   const intelligentDigits = useMemo(() => {
@@ -140,13 +124,13 @@ export default function DashboardPage() {
   const intelligentLeastDigit = useMemo(() => {
     if (intelligentTotal < 20) return null;
 
-    const count = Array(10).fill(0);
+    const count = Array.from({ length: 10 }, () => 0);
     intelligentDigits.forEach((d) => count[d]++);
 
     return count.indexOf(Math.min(...count));
   }, [intelligentDigits, intelligentTotal]);
 
-  /* ---------------- HELPERS ---------------- */
+  /* -------------------- HELPERS -------------------- */
 
   const safeSend = (obj: any) => {
     const ws = wsRef.current;
@@ -154,17 +138,16 @@ export default function DashboardPage() {
     ws.send(JSON.stringify(obj));
   };
 
-  const newReqId = () =>
-    Date.now() + Math.floor(Math.random() * 10000);
+  const newReqId = () => Date.now() + Math.floor(Math.random() * 1000);
 
   const getLastDigit = (quote: number) => {
-    const q = quote.toFixed(pipSize).replace(".", "");
-    return Number(q[q.length - 1]);
+    const fixed = quote.toFixed(pipSize).replace(".", "");
+    return Number(fixed[fixed.length - 1]);
   };
 
   /* ================================================================
-     CONNECT TO DERIV
-  ================================================================= */
+     WEBSOCKET CONNECTION
+  ================================================================== */
 
   const connectDeriv = () => {
     if (!token) return alert("Enter Deriv API Token");
@@ -175,37 +158,29 @@ export default function DashboardPage() {
       `wss://ws.derivws.com/websockets/v3?app_id=${APP_ID}`
     );
 
-    wsRef.current.onopen = () => {
-      safeSend({ authorize: token });
-    };
+    wsRef.current.onopen = () => safeSend({ authorize: token });
 
-    wsRef.current.onmessage = (event) => {
-      const msg = JSON.parse(event.data);
+    wsRef.current.onmessage = (e) => {
+      const msg = JSON.parse(e.data);
 
       if (msg.error) {
         alert(msg.error.message);
         return;
       }
 
-      /* AUTH ✓ */
       if (msg.msg_type === "authorize") {
         authorizedRef.current = true;
         setConnected(true);
 
         safeSend({ balance: 1, subscribe: 1 });
-
-        PAIRS.forEach((p) =>
-          safeSend({ ticks: p, subscribe: 1 })
-        );
+        PAIRS.forEach((p) => safeSend({ ticks: p, subscribe: 1 }));
       }
 
-      /* BALANCE ✓ */
       if (msg.msg_type === "balance") {
         setBalance(msg.balance.balance);
         setCurrency(msg.balance.currency);
       }
 
-      /* TICK STREAM ✓ */
       if (msg.msg_type === "tick") {
         const symbol = msg.tick.symbol as Pair;
         const digit = getLastDigit(msg.tick.quote);
@@ -215,18 +190,19 @@ export default function DashboardPage() {
         if (arr.length > 200) arr.shift();
 
         if (symbol === selectedPair) {
-          setTicks([...arr]); // safe
+          setTicks([...arr]); // safe update
         }
       }
 
-      /* CONTRACT UPDATE ✓ */
+      /* ---- TRADE SETTLEMENT ---- */
+
       if (msg.msg_type === "proposal_open_contract") {
         const poc = msg.proposal_open_contract;
 
         if (!poc.is_sold) return;
 
-        const ref = tradesRef.current[poc.contract_id];
-        if (!ref) return;
+        const tradeRef = tradesRef.current[poc.contract_id];
+        if (!tradeRef) return;
 
         const finalDigit = getLastDigit(poc.exit_spot);
         const win = poc.profit > 0;
@@ -235,7 +211,7 @@ export default function DashboardPage() {
 
         setTradeHistory((prev) =>
           prev.map((t) =>
-            t.id === ref.req_id
+            t.id === tradeRef.req_id
               ? {
                   ...t,
                   result: win ? "Win" : "Loss",
@@ -250,17 +226,16 @@ export default function DashboardPage() {
         delete tradesRef.current[poc.contract_id];
       }
 
-      /* BUY RECEIPT ✓ */
+      /* ---- BUY RESPONSE ---- */
+
       if (msg.msg_type === "buy") {
-        tradesRef.current[msg.buy.contract_id] = {
-          req_id: msg.req_id,
-        };
+        tradesRef.current[msg.buy.contract_id] = { req_id: msg.req_id };
       }
     };
 
     wsRef.current.onclose = () => {
-      authorizedRef.current = false;
       setConnected(false);
+      authorizedRef.current = false;
       setBalance(null);
     };
   };
@@ -271,7 +246,7 @@ export default function DashboardPage() {
     setConnected(false);
   };
 
-  /* ---------------- PLACE TRADE ---------------- */
+  /* -------------------- PLACE TRADE -------------------- */
 
   const tradesRef = useRef<Record<number, { req_id: number }>>({});
 
@@ -279,7 +254,7 @@ export default function DashboardPage() {
     if (!connected || !authorizedRef.current)
       return alert("Not connected");
 
-    if (selectedDigit === null) return alert("Select digit");
+    if (selectedDigit === null) return alert("Select a digit");
 
     const req_id = newReqId();
 
@@ -311,14 +286,13 @@ export default function DashboardPage() {
     });
   };
 
-  /* 3× BUTTON */
   const on3xSelectedDigit = () => {
     if (instant3xRunning) return;
 
     setInstant3xRunning(true);
     let count = 0;
 
-    const run = async () => {
+    const cycle = async () => {
       try {
         while (count < 3) {
           placeTrade("Differs", mdTickDuration);
@@ -330,20 +304,19 @@ export default function DashboardPage() {
       }
     };
 
-    run();
+    cycle();
   };
 
-  /* AUTO 5× */
   const toggle5x = () => {
     setAuto5xRunning(!auto5xRunning);
     setAnalysisStatus(
-      auto5xRunning ? "Stopped." : "Auto logic not implemented"
+      auto5xRunning ? "Stopped." : "Auto trading logic not implemented."
     );
   };
 
   /* ================================================================
-     UI
-  ================================================================= */
+     UI RENDER
+  ================================================================== */
 
   return (
     <div className="min-h-screen bg-[#0b0c11] text-white p-6">
@@ -352,7 +325,7 @@ export default function DashboardPage() {
       <div className="flex justify-between mb-6">
         <h1 className="text-xl font-semibold">MetroX Trading Dashboard</h1>
 
-        <div className="flex items-center gap-2">
+        <div className="flex gap-2 items-center">
           <span className="text-sm px-3 py-1 rounded-full bg-emerald-600/20 border border-emerald-400/30">
             ● {connected ? "Connected" : "Disconnected"}
           </span>
@@ -362,8 +335,8 @@ export default function DashboardPage() {
               <input
                 type="password"
                 placeholder="API Token"
-                className="bg-black/40 px-3 py-2 rounded-md border border-white/20"
                 onChange={(e) => setToken(e.target.value)}
+                className="bg-black/40 px-3 py-2 rounded-md border border-white/20"
               />
               <button
                 onClick={connectDeriv}
@@ -391,7 +364,7 @@ export default function DashboardPage() {
         </p>
       </div>
 
-      {/* METROX PANEL */}
+      {/* MAIN PANEL */}
       <MetroXPanel
         ticks={ticks}
         pipSize={pipSize}

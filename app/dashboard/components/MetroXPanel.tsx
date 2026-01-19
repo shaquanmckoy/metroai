@@ -17,7 +17,7 @@ type Trade = {
   settlementDigit?: number;
 };
 
-export default function MetroPanel({
+export default function MetroXPanel({
   ticks,
   pipSize,
   stake,
@@ -48,41 +48,93 @@ export default function MetroPanel({
   intelligentDigits,
   intelligentLeastDigit,
   intelligentTotal,
-}: any) {
-  const digitPercent = (d: number): number => {
-    if (!ticks.length) return 0;
-    return (ticks.filter((x: number) => x === d).length / ticks.length) * 100;
+}: {
+  ticks: number[];
+  pipSize: number;
+
+  stake: number;
+  setStake: (v: number) => void;
+
+  selectedDigit: number | null;
+  setSelectedDigit: (v: number | null) => void;
+
+  selectedPair: Pair;
+  setSelectedPair: (p: Pair) => void;
+
+  mdTradeType: "Differs" | "Matches";
+  setMdTradeType: (v: "Differs" | "Matches") => void;
+
+  mdTickDuration: number;
+  setMdTickDuration: (v: number) => void;
+
+  onPlaceMetroX: () => void;
+  on3xSelectedDigit: () => void;
+  instant3xRunning: boolean;
+
+  turboMode: boolean;
+  setTurboMode: (v: boolean) => void;
+
+  onToggle5x: () => void;
+  auto5xRunning: boolean;
+
+  analysisStatus: string;
+
+  lastWinDigit: number | null;
+  lastLossDigit: number | null;
+
+  tradeHistory: Trade[];
+  onClearHistory: () => void;
+
+  currency: string;
+
+  intelligentEnabled: boolean;
+  setIntelligentEnabled: (v: boolean) => void;
+  intelligentDigits: number[];
+  intelligentLeastDigit: number | null;
+  intelligentTotal: number;
+}) {
+  /* ------------------ DIGIT STATS ------------------ */
+
+  const digitPercent = (d: number) => {
+    if (!ticks || ticks.length === 0) return 0;
+    return (ticks.filter((x) => x === d).length / ticks.length) * 100;
   };
 
-  const HIGH_PCT = 13.0;
-  const lastDigit = ticks.length > 0 ? ticks[ticks.length - 1] : null;
+  const HIGH_PCT = 13;
+
+  const lastDigit =
+    ticks && ticks.length > 0 ? (ticks[ticks.length - 1] as number) : null;
 
   const digits = Array.from({ length: 10 }, (_, i) => i);
 
   return (
     <div className="bg-gradient-to-br from-[#1b2235]/95 to-[#121826]/95 p-6 min-h-[520px]">
 
-      {/* SELECT INDEX + STAKE */}
+      {/* ======================== TOP ======================== */}
       <div className="grid grid-cols-2 gap-3 mb-4">
+        {/* Select Pair */}
         <div>
           <p className="text-[11px] text-white/60 mb-1">Select Index</p>
           <select
-            className="w-full bg-[#0e1422] border border-white/10 p-2 rounded-md text-sm"
             value={selectedPair}
             onChange={(e) => setSelectedPair(e.target.value as Pair)}
+            className="w-full bg-[#0e1422] border border-white/10 p-2 rounded-md text-sm"
           >
-            {PAIRS.map((p: Pair) => (
-              <option key={p}>{p}</option>
+            {PAIRS.map((p) => (
+              <option key={p} value={p}>
+                {p}
+              </option>
             ))}
           </select>
         </div>
 
+        {/* Stake */}
         <div>
           <p className="text-[11px] text-white/60 mb-1">Stake Amount</p>
           <input
             type="number"
-            step="0.1"
-            min="0.1"
+            min={0.1}
+            step={0.1}
             value={stake}
             onChange={(e) => setStake(Number(e.target.value))}
             className="w-full bg-[#0e1422] border border-white/10 p-2 rounded-md text-sm"
@@ -90,10 +142,12 @@ export default function MetroPanel({
         </div>
       </div>
 
-      {/* INTELLIGENT DIFFERS */}
+      {/* ===================== INTELLIGENT ===================== */}
       <div className="bg-[#13233d]/40 border border-white/10 rounded-xl p-4 mb-4">
-        <div className="flex justify-between items-center">
-          <span className="text-sm font-semibold text-yellow-200">💡 Intelligent DIFFERS</span>
+        <div className="flex items-center justify-between">
+          <p className="text-sm font-semibold text-yellow-200 flex gap-2 items-center">
+            💡 Intelligent DIFFERS
+          </p>
 
           <button
             onClick={() => setIntelligentEnabled(!intelligentEnabled)}
@@ -111,18 +165,23 @@ export default function MetroPanel({
           <div className="mt-3 text-xs text-white/70">
             <p>
               Recent Digits ({intelligentTotal}):{" "}
-              <span className="text-emerald-300 font-semibold">{intelligentDigits.join(" ")}</span>
+              <span className="text-emerald-300 font-semibold tracking-widest">
+                {intelligentDigits.join(" ")}
+              </span>
             </p>
 
             {intelligentTotal < 20 ? (
               <p className="mt-2 text-yellow-200 font-semibold">
-                Waiting for {20 - intelligentTotal} more ticks...
+                Waiting for 20 ticks ({intelligentTotal}/20)
               </p>
             ) : (
               <div className="mt-3 text-center">
                 <p className="text-white/60 text-xs">Least Frequent Digit</p>
                 <p className="text-5xl text-yellow-300 font-bold">
-                  {intelligentLeastDigit}
+                  {intelligentLeastDigit ?? "-"}
+                </p>
+                <p className="text-white/60 text-xs mt-1">
+                  Suggested: DIFFERS {intelligentLeastDigit}
                 </p>
               </div>
             )}
@@ -130,27 +189,36 @@ export default function MetroPanel({
         )}
       </div>
 
-      {/* DIGIT GRID */}
+      {/* ======================== DIGITS ======================== */}
       <p className="text-sm text-white/80 mb-2">
-        Select digit for <span className="font-semibold">{mdTradeType}</span>
+        Select digit for{" "}
+        <span className="font-semibold">{mdTradeType.toUpperCase()}</span>
       </p>
 
       <div className="grid grid-cols-5 gap-3">
-        {digits.map((d: number) => {
+        {digits.map((d) => {
           const pct = digitPercent(d);
           const isSelected = selectedDigit === d;
+          const isHigh = pct >= HIGH_PCT;
+          const isWin = lastWinDigit === d;
+          const isLoss = lastLossDigit === d;
+          const isLive = lastDigit === d;
 
           let cls =
-            "relative rounded-full py-3 text-center border bg-[#0e1422] border-white/10 text-white";
+            "relative rounded-full py-3 text-center border transition bg-[#0e1422] border-white/10 text-white";
 
-          if (isSelected) cls = "bg-blue-600/90 border-blue-400";
-          if (lastWinDigit === d) cls = "bg-emerald-600/30 border-emerald-400";
-          if (lastLossDigit === d) cls = "bg-red-600/30 border-red-400";
-          if (lastDigit === d) cls = "bg-emerald-600/20 border-emerald-400";
-          if (pct >= HIGH_PCT) cls = "bg-red-600/20 border-red-400";
+          if (isSelected) cls = "bg-blue-600/90 border-blue-400 text-white";
+          else if (isWin) cls = "bg-emerald-600/30 border-emerald-400 text-white";
+          else if (isLoss) cls = "bg-red-600/30 border-red-400 text-white";
+          else if (isLive) cls = "bg-emerald-600/20 border-emerald-400 text-white";
+          else if (isHigh) cls = "bg-red-600/20 border-red-400 text-white";
 
           return (
-            <button key={d} className={cls} onClick={() => setSelectedDigit(d)}>
+            <button
+              key={d}
+              onClick={() => setSelectedDigit(d)}
+              className={cls}
+            >
               <div className="text-lg font-bold">{d}</div>
               <div className="text-[11px] text-white/60">{pct.toFixed(1)}%</div>
             </button>
@@ -158,38 +226,74 @@ export default function MetroPanel({
         })}
       </div>
 
-      {/* ACTION BUTTONS */}
+      {/* ======================== ACTIONS ======================== */}
       <div className="mt-5 space-y-3">
+        {/* Main trade button */}
         <button
-          onClick={onPlaceMetroX}
-          className="w-full rounded-md py-3 bg-emerald-600 text-sm font-semibold"
+          onClick={() => {
+            if (selectedDigit === null) return alert("Choose a digit!");
+            onPlaceMetroX();
+          }}
+          className="w-full rounded-md py-3 bg-emerald-600 hover:bg-emerald-700 text-sm font-semibold"
         >
           ⚡ Place MetroX Trade
         </button>
 
+        {/* 3x */}
         <button
           onClick={on3xSelectedDigit}
           disabled={instant3xRunning}
           className={`w-full rounded-md py-3 text-sm font-semibold ${
-            instant3xRunning ? "bg-gray-600" : "bg-red-600"
+            instant3xRunning
+              ? "bg-gray-600 cursor-not-allowed"
+              : "bg-red-600 hover:bg-red-700"
           }`}
         >
-          {instant3xRunning ? "Placing..." : "3× Selected Digit"}
+          {instant3xRunning ? "Placing 3 trades..." : "3× Selected Digit"}
         </button>
 
+        {/* 5x AutoTrading */}
         <button
           onClick={onToggle5x}
           className={`w-full rounded-md py-3 text-sm font-semibold ${
-            auto5xRunning ? "bg-orange-600" : "bg-purple-600"
+            auto5xRunning
+              ? "bg-orange-600 hover:bg-orange-700"
+              : "bg-purple-600 hover:bg-purple-700"
           }`}
         >
-          {auto5xRunning ? "Stop 5× Auto" : "Start 5× Auto"}
+          {auto5xRunning ? "Stop 5× AutoTrading" : "5× AutoTrading"}
         </button>
+
+        {/* Turbo Mode */}
+        <div className="flex justify-between items-center text-xs text-white/70 mt-2">
+          <span>Turbo Mode</span>
+          <button
+            onClick={() => setTurboMode(!turboMode)}
+            className={`w-12 h-6 rounded-full relative border ${
+              turboMode
+                ? "bg-orange-500 border-orange-400"
+                : "bg-white/10 border-white/20"
+            }`}
+          >
+            <span
+              className={`absolute top-0.5 w-5 h-5 bg-white rounded-full transition ${
+                turboMode ? "right-0.5" : "left-0.5"
+              }`}
+            />
+          </button>
+        </div>
+
+        {/* Analysis */}
+        {analysisStatus && (
+          <div className="bg-white/5 border border-white/10 text-xs text-white/70 p-3 rounded-lg">
+            {analysisStatus}
+          </div>
+        )}
       </div>
 
-      {/* HISTORY */}
+      {/* ======================== HISTORY ======================== */}
       <div className="mt-6">
-        <div className="flex justify-between mb-2">
+        <div className="flex items-center justify-between mb-2">
           <p className="font-semibold text-white/90">Trade History</p>
           <button
             onClick={onClearHistory}
@@ -200,8 +304,11 @@ export default function MetroPanel({
         </div>
 
         <div className="max-h-72 overflow-y-auto space-y-2 pr-1">
-          {tradeHistory.map((t: Trade) => (
-            <div key={t.id} className="bg-white/5 border border-white/10 rounded-lg p-3 text-xs">
+          {tradeHistory.map((t) => (
+            <div
+              key={t.id}
+              className="bg-white/5 border border-white/10 rounded-lg p-3 text-xs text-white/70"
+            >
               <div className="flex justify-between">
                 <span>{t.symbol}</span>
                 <span
@@ -217,11 +324,14 @@ export default function MetroPanel({
                 </span>
               </div>
 
-              <p className="mt-1 text-[11px]">
-                Digit {t.digit} — Stake {t.stake} {currency}
+              <div className="mt-1 text-[11px]">
+                Digit {t.digit} • Stake {t.stake} {currency}
                 <br />
-                Profit: {t.profit !== undefined ? `${t.profit} ${currency}` : "-"}
-              </p>
+                Profit:{" "}
+                {t.profit !== undefined
+                  ? `${t.profit >= 0 ? "+" : ""}${t.profit.toFixed(2)} ${currency}`
+                  : "-"}
+              </div>
             </div>
           ))}
         </div>
