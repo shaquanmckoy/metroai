@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useMemo, useState, useEffect } from "react";
+import React from "react";
 import { PAIRS, Pair } from "../page";
 
 type Trade = {
@@ -97,9 +97,7 @@ export default function MetroXPanel({
 
   const digitPercent = (d: number): number => {
     if (!ticks.length) return 0;
-    return (
-      (ticks.filter((x: number) => x === d).length / ticks.length) * 100
-    );
+    return (ticks.filter((x) => x === d).length / ticks.length) * 100;
   };
 
   const HIGH_PCT = 13.0;
@@ -109,7 +107,7 @@ export default function MetroXPanel({
 
   /* ------------------ DIGITS GRID ------------------ */
 
-  const digits: number[] = Array.from({ length: 10 }, (_: unknown, i: number) => i);
+  const digits: number[] = Array.from({ length: 10 }, (_, i) => i);
 
   return (
     <div className="bg-gradient-to-br from-[#1b2235]/95 to-[#121826]/95 p-6 min-h-[520px]">
@@ -131,7 +129,6 @@ export default function MetroXPanel({
           </select>
         </div>
 
-        {/* Stake Amount */}
         <div>
           <p className="text-[11px] text-white/60 mb-1">Stake Amount</p>
           <input
@@ -145,7 +142,7 @@ export default function MetroXPanel({
         </div>
       </div>
 
-      {/* ================== INTELLIGENT DIFFERS PANEL ================== */}
+      {/* ================== INTELLIGENT DIFFERS ================== */}
       <div className="bg-[#13233d]/40 border border-white/10 rounded-xl p-4 mb-4">
         <div className="flex items-center justify-between">
           <p className="text-sm font-semibold text-yellow-200 flex gap-2 items-center">
@@ -169,7 +166,7 @@ export default function MetroXPanel({
             <p>
               Recent Digits ({intelligentTotal}):{" "}
               <span className="text-emerald-300 font-semibold tracking-widest">
-                {intelligentDigits.map((d: number) => d).join(" ")}
+                {intelligentDigits.join(" ")}
               </span>
             </p>
 
@@ -200,8 +197,8 @@ export default function MetroXPanel({
 
       <div className="grid grid-cols-5 gap-3">
         {digits.map((d: number) => {
-          const isSelected = selectedDigit === d;
           const pct = digitPercent(d);
+          const isSelected = selectedDigit === d;
           const isHigh = pct >= HIGH_PCT;
           const isWin = lastWinDigit === d;
           const isLoss = lastLossDigit === d;
@@ -219,9 +216,7 @@ export default function MetroXPanel({
           return (
             <button key={d} onClick={() => setSelectedDigit(d)} className={cls}>
               <div className="text-lg font-bold">{d}</div>
-              <div className="text-[11px] text-white/60">
-                {pct.toFixed(1)}%
-              </div>
+              <div className="text-[11px] text-white/60">{pct.toFixed(1)}%</div>
             </button>
           );
         })}
@@ -321,6 +316,7 @@ export default function MetroXPanel({
                   {t.result}
                 </span>
               </div>
+
               <div className="mt-1 text-[11px]">
                 Digit {t.digit} • Stake {t.stake} {currency}
                 <br />
