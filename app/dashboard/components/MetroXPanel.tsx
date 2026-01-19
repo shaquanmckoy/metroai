@@ -3,6 +3,20 @@
 import React, { useMemo, useState, useEffect } from "react";
 import { PAIRS, Pair } from "../page";
 
+type Trade = {
+  id: number;
+  symbol: Pair;
+  digit: number;
+  type: string;
+  stake: number;
+  durationTicks: number;
+  result: string;
+  createdAt: number;
+  payout?: number;
+  profit?: number;
+  settlementDigit?: number;
+};
+
 export default function MetroXPanel({
   ticks,
   pipSize,
@@ -24,102 +38,153 @@ export default function MetroXPanel({
   onToggle5x,
   auto5xRunning,
   analysisStatus,
-  analysisOpen,
-  setAnalysisOpen,
   lastWinDigit,
   lastLossDigit,
-  pairMeta,
   tradeHistory,
   onClearHistory,
   currency,
-  run1xAutoAllPairs,
-  auto1xRunning,
-}: any) {
-  const last20 = ticks.slice(-20);
+  intelligentEnabled,
+  setIntelligentEnabled,
+  intelligentDigits,
+  intelligentLeastDigit,
+  intelligentTotal,
+}: {
+  ticks: number[];
+  pipSize: number;
 
-  const digitPercent = (d: number) =>
-    ticks.length ? (ticks.filter((x) => x === d).length / ticks.length) * 100 : 0;
+  stake: number;
+  setStake: (n: number) => void;
 
-  const lastDigit = ticks.length ? ticks[ticks.length - 1] : null;
+  selectedDigit: number | null;
+  setSelectedDigit: (d: number | null) => void;
 
-  const HIGH_PCT_THRESHOLD = 13;
+  selectedPair: Pair;
+  setSelectedPair: (p: Pair) => void;
 
-  /* ------------------------- Intelligent DIFFERS ------------------------- */
-  const [intelligentOn, setIntelligentOn] = useState(false);
-  const [intelligentStartLen, setIntelligentStartLen] = useState(0);
+  mdTradeType: "Differs" | "Matches";
+  setMdTradeType: (t: "Differs" | "Matches") => void;
 
-  useEffect(() => {
-    setIntelligentStartLen(ticks.length);
-  }, [selectedPair]);
+  mdTickDuration: number;
+  setMdTickDuration: (n: number) => void;
 
-  useEffect(() => {
-    if (intelligentOn) setIntelligentStartLen(ticks.length);
-  }, [intelligentOn]);
+  onPlaceMetroX: () => void;
+  on3xSelectedDigit: () => void;
+  instant3xRunning: boolean;
 
-  const intelligentDigits = useMemo(() => {
-    const start = Math.min(intelligentStartLen, ticks.length);
-    return ticks.slice(start);
-  }, [ticks, intelligentStartLen]);
+  turboMode: boolean;
+  setTurboMode: (v: boolean) => void;
 
-  const intelligentTotal = intelligentDigits.length;
+  onToggle5x: () => void;
+  auto5xRunning: boolean;
 
-  const intelligentLeast = useMemo(() => {
-    if (intelligentTotal < 20) return null;
-    const freq = Array.from({ length: 10 }, () => 0);
-    intelligentDigits.forEach((d) => (freq[d] = (freq[d] || 0) + 1));
-    let bestDigit = 0;
-    let bestCount = Infinity;
-    for (let d = 0; d < 10; d++) {
-      if (freq[d] < bestCount) {
-        bestCount = freq[d];
-        bestDigit = d;
-      }
-    }
-    return bestDigit;
-  }, [intelligentDigits, intelligentTotal]);
+  analysisStatus: string;
 
-  /* ------------------------------ UI RETURN ------------------------------ */
+  lastWinDigit: number | null;
+  lastLossDigit: number | null;
+
+  tradeHistory: Trade[];
+  onClearHistory: () => void;
+
+  currency: string;
+
+  intelligentEnabled: boolean;
+  setIntelligentEnabled: (v: boolean) => void;
+  intelligentDigits: number[];
+  intelligentLeastDigit: number | null;
+  intelligentTotal: number;
+}) {
+  /* ------------------ % CALCULATIONS ------------------ */
+
+  const digitPercent = (d: number): number => {
+    if (!ticks.length) return 0;
+    return (
+      (ticks.filter((x: number) => x === d).length / ticks.length) * 100
+    );
+  };
+
+  const HIGH_PCT = 13.0;
+
+  const lastDigit: number | null =
+    ticks.length > 0 ? (ticks[ticks.length - 1] as number) : null;
+
+  /* ------------------ DIGITS GRID ------------------ */
+
+  const digits: number[] = Array.from({ length: 10 }, (_: unknown, i: number) => i);
+
   return (
-    <div className="p-6 bg-gradient-to-br from-[#1b2235]/95 to-[#121826]/95 min-h-[520px]">
+    <div className="bg-gradient-to-br from-[#1b2235]/95 to-[#121826]/95 p-6 min-h-[520px]">
 
-      {/* ------------------- Intelligent Differs Panel ------------------- */}
-      <div className="bg-white/5 border border-white/10 rounded-xl p-4 mb-4">
+      {/* ======================== TOP SETTINGS ======================== */}
+      <div className="grid grid-cols-2 gap-3 mb-4">
+        <div>
+          <p className="text-[11px] text-white/60 mb-1">Select Index</p>
+          <select
+            className="w-full bg-[#0e1422] border border-white/10 p-2 rounded-md text-sm"
+            value={selectedPair}
+            onChange={(e) => setSelectedPair(e.target.value as Pair)}
+          >
+            {PAIRS.map((p: Pair) => (
+              <option key={p} value={p}>
+                {p}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        {/* Stake Amount */}
+        <div>
+          <p className="text-[11px] text-white/60 mb-1">Stake Amount</p>
+          <input
+            type="number"
+            step="0.1"
+            min="0.1"
+            value={stake}
+            onChange={(e) => setStake(Number(e.target.value))}
+            className="w-full bg-[#0e1422] border border-white/10 p-2 rounded-md text-sm"
+          />
+        </div>
+      </div>
+
+      {/* ================== INTELLIGENT DIFFERS PANEL ================== */}
+      <div className="bg-[#13233d]/40 border border-white/10 rounded-xl p-4 mb-4">
         <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <span className="text-yellow-300">💡</span>
-            <p className="text-sm font-semibold text-yellow-200">
-              Intelligent DIFFERS
-            </p>
-          </div>
+          <p className="text-sm font-semibold text-yellow-200 flex gap-2 items-center">
+            💡 Intelligent DIFFERS
+          </p>
 
           <button
-            onClick={() => setIntelligentOn(!intelligentOn)}
-            className={`px-4 py-1 rounded-lg text-xs font-semibold border transition ${
-              intelligentOn
-                ? "bg-emerald-600/25 border-emerald-500/40 text-emerald-200"
-                : "bg-white/10 border-white/15 text-white/70"
+            onClick={() => setIntelligentEnabled(!intelligentEnabled)}
+            className={`px-4 py-1 text-xs rounded-lg border ${
+              intelligentEnabled
+                ? "bg-emerald-600/25 border-emerald-400 text-emerald-200"
+                : "bg-white/10 border-white/20 text-white/70"
             }`}
           >
-            {intelligentOn ? "ON" : "OFF"}
+            {intelligentEnabled ? "ON" : "OFF"}
           </button>
         </div>
 
-        {intelligentOn && (
-          <div className="mt-4 bg-black/20 border border-white/10 rounded-lg p-4">
+        {intelligentEnabled && (
+          <div className="mt-3 text-xs text-white/70">
+            <p>
+              Recent Digits ({intelligentTotal}):{" "}
+              <span className="text-emerald-300 font-semibold tracking-widest">
+                {intelligentDigits.map((d: number) => d).join(" ")}
+              </span>
+            </p>
+
             {intelligentTotal < 20 ? (
-              <p className="text-yellow-200 text-sm font-semibold">
-                WAITING FOR 20 TICKS ({intelligentTotal}/20)
+              <p className="mt-2 text-yellow-200 font-semibold">
+                Waiting for 20 ticks ({intelligentTotal}/20)
               </p>
             ) : (
-              <div className="text-center">
-                <p className="text-xs text-white/60 mb-1">
-                  Least frequent digit
+              <div className="mt-3 text-center">
+                <p className="text-white/60 text-xs">Least Frequent Digit</p>
+                <p className="text-5xl text-yellow-300 font-bold">
+                  {intelligentLeastDigit ?? "-"}
                 </p>
-                <p className="text-5xl font-bold text-yellow-300">
-                  {intelligentLeast}
-                </p>
-                <p className="text-xs mt-2 text-white/70">
-                  Best digit for a DIFFERS trade
+                <p className="text-white/60 text-xs mt-1">
+                  Suggested: DIFFERS {intelligentLeastDigit}
                 </p>
               </div>
             )}
@@ -127,107 +192,48 @@ export default function MetroXPanel({
         )}
       </div>
 
-      {/* ------------------------- Digit Grid ------------------------- */}
+      {/* ======================== DIGITS GRID ======================== */}
       <p className="text-sm text-white/80 mb-2">
-        Click a digit to select it for your{" "}
-        <span className="font-semibold">{mdTradeType}</span> trade.
+        Select digit for{" "}
+        <span className="font-semibold">{mdTradeType.toUpperCase()}</span> trade
       </p>
 
-      <div className="grid grid-cols-5 gap-3 mb-4">
-        {Array.from({ length: 10 }, (_, d) => {
+      <div className="grid grid-cols-5 gap-3">
+        {digits.map((d: number) => {
+          const isSelected = selectedDigit === d;
           const pct = digitPercent(d);
-
-          const selected = selectedDigit === d;
-          const won = lastWinDigit === d;
-          const lost = lastLossDigit === d;
-          const live = lastDigit === d;
-          const high = ticks.length >= 20 && pct >= HIGH_PCT_THRESHOLD;
+          const isHigh = pct >= HIGH_PCT;
+          const isWin = lastWinDigit === d;
+          const isLoss = lastLossDigit === d;
+          const isLive = lastDigit === d;
 
           let cls =
-            "relative rounded-full py-3 text-center border transition bg-[#0e1422] border-white/10 text-white/90";
+            "relative rounded-full py-3 text-center border transition bg-[#0e1422] border-white/10 text-white";
 
-          if (selected) cls = "bg-blue-600 border-blue-400 text-white";
-          else if (won) cls = "bg-emerald-600/40 border-emerald-400 text-white";
-          else if (lost) cls = "bg-red-600/40 border-red-400 text-white";
-          else if (live) cls = "bg-emerald-600/20 border-emerald-500/30";
-          else if (high) cls = "bg-red-600/20 border-red-500/35";
+          if (isSelected) cls = "bg-blue-600/90 border-blue-400 text-white";
+          else if (isWin) cls = "bg-emerald-600/30 border-emerald-400 text-white";
+          else if (isLoss) cls = "bg-red-600/30 border-red-400 text-white";
+          else if (isLive) cls = "bg-emerald-600/20 border-emerald-400 text-white";
+          else if (isHigh) cls = "bg-red-600/20 border-red-400 text-white";
 
           return (
-            <button
-              key={d}
-              onClick={() => setSelectedDigit(d)}
-              className={cls}
-            >
-              {selected && (
-                <span className="absolute top-1 right-2 text-white text-sm">✓</span>
-              )}
-
-              {!selected && won && (
-                <span className="absolute top-1 right-2 text-emerald-100 text-sm">💰</span>
-              )}
-
-              {!selected && lost && (
-                <span className="absolute top-1 right-2 text-red-100 text-sm">❌</span>
-              )}
-
-              {!selected && !won && !lost && live && (
-                <span className="absolute top-1 right-2 text-emerald-200 text-sm">●</span>
-              )}
-
-              {!selected && !won && !lost && !live && high && (
-                <span className="absolute top-1 right-2 text-red-200 text-sm">▲</span>
-              )}
-
+            <button key={d} onClick={() => setSelectedDigit(d)} className={cls}>
               <div className="text-lg font-bold">{d}</div>
-              <div className="text-[11px] text-white/60">{pct.toFixed(1)}%</div>
+              <div className="text-[11px] text-white/60">
+                {pct.toFixed(1)}%
+              </div>
             </button>
           );
         })}
       </div>
 
-      {/* ---------------- Tick Count Analysis Toggle ---------------- */}
-      <div className="rounded-lg border border-white/10 bg-white/5 overflow-hidden mb-5">
+      {/* ======================== ACTION BUTTONS ======================== */}
+      <div className="mt-5 space-y-3">
         <button
-          onClick={() => setAnalysisOpen(!analysisOpen)}
-          className="w-full flex items-center justify-between px-3 py-2 text-xs text-white/80 hover:bg-white/5"
-        >
-          <span className="font-semibold">
-            Tick Count Analysis — {selectedPair}
-          </span>
-          <span>{analysisOpen ? "▾" : "▸"}</span>
-        </button>
-
-        {analysisOpen && (
-          <div className="px-3 pb-3 text-white/70 text-xs">
-            {last20.length < 20 ? (
-              <p className="mt-2">Collecting ticks…</p>
-            ) : (
-              <div className="grid grid-cols-5 gap-2 mt-2">
-                {Array.from({ length: 10 }, (_, d) => {
-                  const cnt = last20.filter((x) => x === d).length;
-                  const pct20 = (cnt / 20) * 100;
-                  return (
-                    <div
-                      key={d}
-                      className="rounded-md bg-black/10 border border-white/10 p-2 text-center"
-                    >
-                      <p className="font-bold">{d}</p>
-                      <p>{cnt} / 20</p>
-                      <p className="text-white/55">{pct20.toFixed(1)}%</p>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-        )}
-      </div>
-
-      {/* --------------------- BUTTON ROW (OLD LAYOUT) --------------------- */}
-      <div className="space-y-3">
-
-        <button
-          onClick={() => selectedDigit !== null && onPlaceMetroX()}
+          onClick={() => {
+            if (selectedDigit === null) return alert("Choose a digit first!");
+            onPlaceMetroX();
+          }}
           className="w-full rounded-md py-3 bg-emerald-600 hover:bg-emerald-700 text-sm font-semibold"
         >
           ⚡ Place MetroX Trade
@@ -238,11 +244,11 @@ export default function MetroXPanel({
           disabled={instant3xRunning}
           className={`w-full rounded-md py-3 text-sm font-semibold ${
             instant3xRunning
-              ? "bg-slate-600 cursor-not-allowed"
+              ? "bg-gray-600 cursor-not-allowed"
               : "bg-red-600 hover:bg-red-700"
           }`}
         >
-          {instant3xRunning ? "Placing 3 trades..." : "3x Selected Digit"}
+          {instant3xRunning ? "Placing 3 trades..." : "3× Selected Digit"}
         </button>
 
         <button
@@ -253,30 +259,18 @@ export default function MetroXPanel({
               : "bg-purple-600 hover:bg-purple-700"
           }`}
         >
-          {auto5xRunning ? "Stop 5x AutoTrading" : "5x AutoTrading"}
+          {auto5xRunning ? "Stop 5× AutoTrading" : "5× AutoTrading"}
         </button>
 
-        <button
-          onClick={run1xAutoAllPairs}
-          disabled={auto1xRunning}
-          className={`w-full rounded-md py-3 text-sm font-semibold ${
-            auto1xRunning
-              ? "bg-slate-600 cursor-not-allowed"
-              : "bg-indigo-600 hover:bg-indigo-700"
-          }`}
-        >
-          {auto1xRunning ? "Scanning…" : "1x Auto All Pairs"}
-        </button>
-
-        {/* Turbo Mode toggle */}
-        <div className="flex items-center justify-between text-xs text-white/70">
+        {/* Turbo Mode */}
+        <div className="flex justify-between items-center text-xs text-white/70 mt-2">
           <span>Turbo Mode</span>
           <button
             onClick={() => setTurboMode(!turboMode)}
-            className={`w-12 h-6 rounded-full relative border transition ${
+            className={`w-12 h-6 rounded-full relative border ${
               turboMode
-                ? "bg-orange-500/70 border-orange-400/60"
-                : "bg-white/10 border-white/15"
+                ? "bg-orange-500 border-orange-400"
+                : "bg-white/10 border-white/20"
             }`}
           >
             <span
@@ -286,97 +280,58 @@ export default function MetroXPanel({
             />
           </button>
         </div>
+
+        {/* Strategy Analysis */}
+        {analysisStatus && (
+          <div className="bg-white/5 border border-white/10 text-xs text-white/70 p-3 rounded-lg">
+            {analysisStatus}
+          </div>
+        )}
       </div>
 
-      {/* ---------------------- Trade History ---------------------- */}
-      <TradeHistory tradeHistory={tradeHistory} currency={currency} onClear={onClearHistory} />
-    </div>
-  );
-}
+      {/* ======================== TRADE HISTORY ======================== */}
+      <div className="mt-6">
+        <div className="flex items-center justify-between mb-2">
+          <p className="font-semibold text-white/90">Trade History</p>
+          <button
+            onClick={onClearHistory}
+            className="px-3 py-1 bg-red-600/30 border border-red-500 text-red-200 rounded-md text-xs"
+          >
+            Clear
+          </button>
+        </div>
 
-/* ---------------------------- Trade History Component ---------------------------- */
-
-function TradeHistory({ tradeHistory, currency, onClear }: any) {
-  const [tab, setTab] = useState<"all" | "wins" | "losses">("all");
-
-  const wins = tradeHistory.filter((t: any) => t.result === "Win").length;
-  const losses = tradeHistory.filter((t: any) => t.result === "Loss").length;
-  const net = tradeHistory.reduce((acc: number, t: any) => acc + Number(t.profit || 0), 0);
-
-  const filtered = tradeHistory.filter((t: any) => {
-    if (tab === "wins") return t.result === "Win";
-    if (tab === "losses") return t.result === "Loss";
-    return true;
-  });
-
-  return (
-    <div className="mt-6 bg-white/5 border border-white/10 rounded-xl p-4">
-      <div className="flex items-center justify-between mb-3">
-        <p className="font-semibold">Trade History</p>
-        <button
-          onClick={onClear}
-          className="text-red-300 hover:text-red-200 text-sm"
-        >
-          Clear
-        </button>
-      </div>
-
-      <div className="grid grid-cols-3 gap-2 mb-4 text-xs">
-        <button
-          onClick={() => setTab("all")}
-          className={`py-2 rounded-full ${
-            tab === "all" ? "bg-sky-600/30" : "bg-white/10"
-          }`}
-        >
-          All ({tradeHistory.length})
-        </button>
-        <button
-          onClick={() => setTab("wins")}
-          className={`py-2 rounded-full ${
-            tab === "wins" ? "bg-emerald-600/30" : "bg-white/10"
-          }`}
-        >
-          Wins ({wins})
-        </button>
-        <button
-          onClick={() => setTab("losses")}
-          className={`py-2 rounded-full ${
-            tab === "losses" ? "bg-red-600/30" : "bg-white/10"
-          }`}
-        >
-          Losses ({losses})
-        </button>
-      </div>
-
-      <div className="max-h-72 overflow-y-auto pr-1 space-y-2">
-        {filtered.length === 0 ? (
-          <p className="text-xs text-white/50">No trades yet.</p>
-        ) : (
-          filtered.map((t: any, idx: number) => (
+        <div className="max-h-72 overflow-y-auto space-y-2 pr-1">
+          {tradeHistory.map((t: Trade) => (
             <div
-              key={idx}
-              className="bg-black/20 border border-white/10 rounded-lg p-3 text-xs"
+              key={t.id}
+              className="bg-white/5 border border-white/10 rounded-lg p-3 text-xs text-white/70"
             >
-              <div className="flex justify-between mb-1">
-                <span className="font-semibold">{t.symbol}</span>
+              <div className="flex justify-between">
+                <span>{t.symbol}</span>
                 <span
-                  className={`font-semibold ${
+                  className={
                     t.result === "Win"
-                      ? "text-emerald-400"
+                      ? "text-emerald-300"
                       : t.result === "Loss"
-                      ? "text-red-400"
+                      ? "text-red-300"
                       : "text-yellow-300"
-                  }`}
+                  }
                 >
                   {t.result}
                 </span>
               </div>
-              <div>Digit: {t.digit}</div>
-              <div>Stake: {t.stake} {currency}</div>
-              <div>Profit: {t.profit?.toFixed(2) ?? "-"}</div>
+              <div className="mt-1 text-[11px]">
+                Digit {t.digit} • Stake {t.stake} {currency}
+                <br />
+                Profit:{" "}
+                {t.profit !== undefined
+                  ? `${t.profit >= 0 ? "+" : ""}${t.profit.toFixed(2)} ${currency}`
+                  : "-"}
+              </div>
             </div>
-          ))
-        )}
+          ))}
+        </div>
       </div>
     </div>
   );
