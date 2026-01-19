@@ -48,93 +48,44 @@ export default function MetroXPanel({
   intelligentDigits,
   intelligentLeastDigit,
   intelligentTotal,
-}: {
-  ticks: number[];
-  pipSize: number;
+}: any) {
+  /* ------------------ % CALCULATIONS ------------------ */
 
-  stake: number;
-  setStake: (v: number) => void;
-
-  selectedDigit: number | null;
-  setSelectedDigit: (v: number | null) => void;
-
-  selectedPair: Pair;
-  setSelectedPair: (p: Pair) => void;
-
-  mdTradeType: "Differs" | "Matches";
-  setMdTradeType: (v: "Differs" | "Matches") => void;
-
-  mdTickDuration: number;
-  setMdTickDuration: (v: number) => void;
-
-  onPlaceMetroX: () => void;
-  on3xSelectedDigit: () => void;
-  instant3xRunning: boolean;
-
-  turboMode: boolean;
-  setTurboMode: (v: boolean) => void;
-
-  onToggle5x: () => void;
-  auto5xRunning: boolean;
-
-  analysisStatus: string;
-
-  lastWinDigit: number | null;
-  lastLossDigit: number | null;
-
-  tradeHistory: Trade[];
-  onClearHistory: () => void;
-
-  currency: string;
-
-  intelligentEnabled: boolean;
-  setIntelligentEnabled: (v: boolean) => void;
-  intelligentDigits: number[];
-  intelligentLeastDigit: number | null;
-  intelligentTotal: number;
-}) {
-  /* ------------------ DIGIT STATS ------------------ */
-
-  const digitPercent = (d: number) => {
-    if (!ticks || ticks.length === 0) return 0;
-    return (ticks.filter((x) => x === d).length / ticks.length) * 100;
+  const digitPercent = (d: number): number => {
+    if (!ticks.length) return 0;
+    return (ticks.filter((x: number) => x === d).length / ticks.length) * 100;
   };
 
-  const HIGH_PCT = 13;
+  const HIGH_PCT = 13.0;
+  const lastDigit: number | null =
+    ticks.length > 0 ? (ticks[ticks.length - 1] as number) : null;
 
-  const lastDigit =
-    ticks && ticks.length > 0 ? (ticks[ticks.length - 1] as number) : null;
-
-  const digits = Array.from({ length: 10 }, (_, i) => i);
+  const digits: number[] = Array.from({ length: 10 }, (_, i) => i);
 
   return (
     <div className="bg-gradient-to-br from-[#1b2235]/95 to-[#121826]/95 p-6 min-h-[520px]">
 
-      {/* ======================== TOP ======================== */}
+      {/* TOP SETTINGS */}
       <div className="grid grid-cols-2 gap-3 mb-4">
-        {/* Select Pair */}
         <div>
           <p className="text-[11px] text-white/60 mb-1">Select Index</p>
           <select
+            className="w-full bg-[#0e1422] border border-white/10 p-2 rounded-md text-sm"
             value={selectedPair}
             onChange={(e) => setSelectedPair(e.target.value as Pair)}
-            className="w-full bg-[#0e1422] border border-white/10 p-2 rounded-md text-sm"
           >
-            {PAIRS.map((p) => (
-              <option key={p} value={p}>
-                {p}
-              </option>
+            {PAIRS.map((p: Pair) => (
+              <option key={p}>{p}</option>
             ))}
           </select>
         </div>
 
-        {/* Stake */}
         <div>
           <p className="text-[11px] text-white/60 mb-1">Stake Amount</p>
           <input
             type="number"
-            min={0.1}
-            step={0.1}
+            step="0.1"
+            min="0.1"
             value={stake}
             onChange={(e) => setStake(Number(e.target.value))}
             className="w-full bg-[#0e1422] border border-white/10 p-2 rounded-md text-sm"
@@ -142,12 +93,10 @@ export default function MetroXPanel({
         </div>
       </div>
 
-      {/* ===================== INTELLIGENT ===================== */}
+      {/* INTELLIGENT DIFFERS */}
       <div className="bg-[#13233d]/40 border border-white/10 rounded-xl p-4 mb-4">
         <div className="flex items-center justify-between">
-          <p className="text-sm font-semibold text-yellow-200 flex gap-2 items-center">
-            💡 Intelligent DIFFERS
-          </p>
+          <p className="text-sm font-semibold text-yellow-200">💡 Intelligent DIFFERS</p>
 
           <button
             onClick={() => setIntelligentEnabled(!intelligentEnabled)}
@@ -165,7 +114,7 @@ export default function MetroXPanel({
           <div className="mt-3 text-xs text-white/70">
             <p>
               Recent Digits ({intelligentTotal}):{" "}
-              <span className="text-emerald-300 font-semibold tracking-widest">
+              <span className="text-emerald-300 tracking-widest">
                 {intelligentDigits.join(" ")}
               </span>
             </p>
@@ -189,15 +138,15 @@ export default function MetroXPanel({
         )}
       </div>
 
-      {/* ======================== DIGITS ======================== */}
+      {/* DIGITS GRID */}
       <p className="text-sm text-white/80 mb-2">
-        Select digit for{" "}
-        <span className="font-semibold">{mdTradeType.toUpperCase()}</span>
+        Select digit for <span className="font-semibold">{mdTradeType}</span>
       </p>
 
       <div className="grid grid-cols-5 gap-3">
-        {digits.map((d) => {
+        {digits.map((d: number) => {
           const pct = digitPercent(d);
+
           const isSelected = selectedDigit === d;
           const isHigh = pct >= HIGH_PCT;
           const isWin = lastWinDigit === d;
@@ -205,20 +154,16 @@ export default function MetroXPanel({
           const isLive = lastDigit === d;
 
           let cls =
-            "relative rounded-full py-3 text-center border transition bg-[#0e1422] border-white/10 text-white";
+            "rounded-full py-3 text-center border bg-[#0e1422] border-white/10 text-white";
 
-          if (isSelected) cls = "bg-blue-600/90 border-blue-400 text-white";
-          else if (isWin) cls = "bg-emerald-600/30 border-emerald-400 text-white";
-          else if (isLoss) cls = "bg-red-600/30 border-red-400 text-white";
-          else if (isLive) cls = "bg-emerald-600/20 border-emerald-400 text-white";
-          else if (isHigh) cls = "bg-red-600/20 border-red-400 text-white";
+          if (isSelected) cls = "bg-blue-600/90 border-blue-400";
+          else if (isWin) cls = "bg-emerald-600/30 border-emerald-400";
+          else if (isLoss) cls = "bg-red-600/30 border-red-400";
+          else if (isLive) cls = "bg-emerald-600/20 border-emerald-400";
+          else if (isHigh) cls = "bg-red-600/20 border-red-400";
 
           return (
-            <button
-              key={d}
-              onClick={() => setSelectedDigit(d)}
-              className={cls}
-            >
+            <button key={d} onClick={() => setSelectedDigit(d)} className={cls}>
               <div className="text-lg font-bold">{d}</div>
               <div className="text-[11px] text-white/60">{pct.toFixed(1)}%</div>
             </button>
@@ -226,36 +171,31 @@ export default function MetroXPanel({
         })}
       </div>
 
-      {/* ======================== ACTIONS ======================== */}
+      {/* ACTION BUTTONS */}
       <div className="mt-5 space-y-3">
-        {/* Main trade button */}
         <button
           onClick={() => {
-            if (selectedDigit === null) return alert("Choose a digit!");
+            if (selectedDigit === null) return alert("Choose a digit first!");
             onPlaceMetroX();
           }}
-          className="w-full rounded-md py-3 bg-emerald-600 hover:bg-emerald-700 text-sm font-semibold"
+          className="w-full rounded-md py-3 bg-emerald-600 hover:bg-emerald-700 text-sm"
         >
           ⚡ Place MetroX Trade
         </button>
 
-        {/* 3x */}
         <button
           onClick={on3xSelectedDigit}
           disabled={instant3xRunning}
-          className={`w-full rounded-md py-3 text-sm font-semibold ${
-            instant3xRunning
-              ? "bg-gray-600 cursor-not-allowed"
-              : "bg-red-600 hover:bg-red-700"
+          className={`w-full rounded-md py-3 text-sm ${
+            instant3xRunning ? "bg-gray-600" : "bg-red-600 hover:bg-red-700"
           }`}
         >
           {instant3xRunning ? "Placing 3 trades..." : "3× Selected Digit"}
         </button>
 
-        {/* 5x AutoTrading */}
         <button
           onClick={onToggle5x}
-          className={`w-full rounded-md py-3 text-sm font-semibold ${
+          className={`w-full rounded-md py-3 text-sm ${
             auto5xRunning
               ? "bg-orange-600 hover:bg-orange-700"
               : "bg-purple-600 hover:bg-purple-700"
@@ -264,15 +204,13 @@ export default function MetroXPanel({
           {auto5xRunning ? "Stop 5× AutoTrading" : "5× AutoTrading"}
         </button>
 
-        {/* Turbo Mode */}
+        {/* Turbo */}
         <div className="flex justify-between items-center text-xs text-white/70 mt-2">
           <span>Turbo Mode</span>
           <button
             onClick={() => setTurboMode(!turboMode)}
             className={`w-12 h-6 rounded-full relative border ${
-              turboMode
-                ? "bg-orange-500 border-orange-400"
-                : "bg-white/10 border-white/20"
+              turboMode ? "bg-orange-500" : "bg-white/10"
             }`}
           >
             <span
@@ -283,17 +221,17 @@ export default function MetroXPanel({
           </button>
         </div>
 
-        {/* Analysis */}
+        {/* Strategy */}
         {analysisStatus && (
-          <div className="bg-white/5 border border-white/10 text-xs text-white/70 p-3 rounded-lg">
+          <div className="bg-white/5 border border-white/10 text-xs p-3 rounded-lg">
             {analysisStatus}
           </div>
         )}
       </div>
 
-      {/* ======================== HISTORY ======================== */}
+      {/* TRADE HISTORY */}
       <div className="mt-6">
-        <div className="flex items-center justify-between mb-2">
+        <div className="flex justify-between mb-2">
           <p className="font-semibold text-white/90">Trade History</p>
           <button
             onClick={onClearHistory}
@@ -304,10 +242,10 @@ export default function MetroXPanel({
         </div>
 
         <div className="max-h-72 overflow-y-auto space-y-2 pr-1">
-          {tradeHistory.map((t) => (
+          {tradeHistory.map((t: Trade) => (
             <div
               key={t.id}
-              className="bg-white/5 border border-white/10 rounded-lg p-3 text-xs text-white/70"
+              className="bg-white/5 border border-white/10 rounded-lg p-3 text-xs"
             >
               <div className="flex justify-between">
                 <span>{t.symbol}</span>

@@ -3,9 +3,7 @@
 import React, { useState, useEffect, useRef, useMemo } from "react";
 import { useRouter } from "next/navigation";
 import MetroXPanel from "./components/MetroXPanel";
-import { PAIRS, Pair } from "./pairs";   // ✅ FIXED — safe import
-
-/* -------------------- TYPES -------------------- */
+import { PAIRS, Pair } from "./pairs";
 
 type TradeResult = "Win" | "Loss" | "Pending";
 type TradeType = "Matches" | "Differs";
@@ -26,38 +24,29 @@ type Trade = {
 
 const APP_ID = 1089;
 
-/* ================================================================
-   DASHBOARD PAGE
-================================================================ */
-
 export default function DashboardPage() {
   const router = useRouter();
 
-  /* -------------------- AUTH CHECK -------------------- */
-
+  /* AUTH */
   const [authChecked, setAuthChecked] = useState(false);
 
   useEffect(() => {
     const logged = localStorage.getItem("loggedIn") === "true";
-    if (!logged) {
-      router.replace("/");
-      return;
-    }
-    setAuthChecked(true);
+    if (!logged) router.replace("/");
+    else setAuthChecked(true);
   }, []);
 
-  if (!authChecked) {
+  if (!authChecked)
     return (
       <main className="min-h-screen flex items-center justify-center text-white">
         Loading...
       </main>
     );
-  }
 
-  /* -------------------- STATE -------------------- */
-
+  /* STATE */
   const wsRef = useRef<WebSocket | null>(null);
   const authorizedRef = useRef(false);
+  const tradesRef = useRef<Record<number, { req_id: number }>>({});
 
   const [token, setToken] = useState("");
   const [connected, setConnected] = useState(false);
@@ -78,13 +67,13 @@ export default function DashboardPage() {
     R_100: [],
   });
 
-  const [stake, setStake] = useState<number>(1);
+  const [stake, setStake] = useState(1);
   const [selectedDigit, setSelectedDigit] = useState<number | null>(null);
 
   const [mdTradeType, setMdTradeType] =
     useState<"Differs" | "Matches">("Differs");
 
-  const [mdTickDuration, setMdTickDuration] = useState<number>(1);
+  const [mdTickDuration, setMdTickDuration] = useState(1);
 
   const [tradeHistory, setTradeHistory] = useState<Trade[]>([]);
   const clearHistory = () => setTradeHistory([]);
@@ -95,7 +84,6 @@ export default function DashboardPage() {
   const flashDigit = (digit: number, win: boolean) => {
     setLastWinDigit(win ? digit : null);
     setLastLossDigit(!win ? digit : null);
-
     setTimeout(() => {
       setLastWinDigit(null);
       setLastLossDigit(null);
@@ -115,8 +103,7 @@ export default function DashboardPage() {
   }, [intelligentEnabled]);
 
   const intelligentDigits = useMemo(() => {
-    const start = Math.min(intelligentStartIndex, ticks.length);
-    return ticks.slice(start);
+    return ticks.slice(intelligentStartIndex);
   }, [ticks, intelligentStartIndex]);
 
   const intelligentTotal = intelligentDigits.length;
@@ -124,18 +111,17 @@ export default function DashboardPage() {
   const intelligentLeastDigit = useMemo(() => {
     if (intelligentTotal < 20) return null;
 
-    const count = Array.from({ length: 10 }, () => 0);
-    intelligentDigits.forEach((d) => count[d]++);
+    const counts = Array.from({ length: 10 }, () => 0);
+    intelligentDigits.forEach((d) => counts[d]++);
 
-    return count.indexOf(Math.min(...count));
+    const min = Math.min(...counts);
+    return counts.indexOf(min);
   }, [intelligentDigits, intelligentTotal]);
 
-  /* -------------------- HELPERS -------------------- */
-
+  /* HELPERS */
   const safeSend = (obj: any) => {
     const ws = wsRef.current;
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    ws.send(JSON.stringify(obj));
+    if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
   };
 
   const newReqId = () => Date.now() + Math.floor(Math.random() * 1000);
@@ -145,15 +131,11 @@ export default function DashboardPage() {
     return Number(fixed[fixed.length - 1]);
   };
 
-  /* ================================================================
-     WEBSOCKET CONNECTION
-  ================================================================== */
-
+  /* CONNECT */
   const connectDeriv = () => {
     if (!token) return alert("Enter Deriv API Token");
 
     wsRef.current?.close();
-
     wsRef.current = new WebSocket(
       `wss://ws.derivws.com/websockets/v3?app_id=${APP_ID}`
     );
@@ -163,10 +145,7 @@ export default function DashboardPage() {
     wsRef.current.onmessage = (e) => {
       const msg = JSON.parse(e.data);
 
-      if (msg.error) {
-        alert(msg.error.message);
-        return;
-      }
+      if (msg.error) return alert(msg.error.message);
 
       if (msg.msg_type === "authorize") {
         authorizedRef.current = true;
@@ -189,20 +168,15 @@ export default function DashboardPage() {
         arr.push(digit);
         if (arr.length > 200) arr.shift();
 
-        if (symbol === selectedPair) {
-          setTicks([...arr]); // safe update
-        }
+        if (symbol === selectedPair) setTicks([...arr]);
       }
-
-      /* ---- TRADE SETTLEMENT ---- */
 
       if (msg.msg_type === "proposal_open_contract") {
         const poc = msg.proposal_open_contract;
-
         if (!poc.is_sold) return;
 
-        const tradeRef = tradesRef.current[poc.contract_id];
-        if (!tradeRef) return;
+        const ref = tradesRef.current[poc.contract_id];
+        if (!ref) return;
 
         const finalDigit = getLastDigit(poc.exit_spot);
         const win = poc.profit > 0;
@@ -211,7 +185,7 @@ export default function DashboardPage() {
 
         setTradeHistory((prev) =>
           prev.map((t) =>
-            t.id === tradeRef.req_id
+            t.id === ref.req_id
               ? {
                   ...t,
                   result: win ? "Win" : "Loss",
@@ -225,8 +199,6 @@ export default function DashboardPage() {
 
         delete tradesRef.current[poc.contract_id];
       }
-
-      /* ---- BUY RESPONSE ---- */
 
       if (msg.msg_type === "buy") {
         tradesRef.current[msg.buy.contract_id] = { req_id: msg.req_id };
@@ -246,15 +218,10 @@ export default function DashboardPage() {
     setConnected(false);
   };
 
-  /* -------------------- PLACE TRADE -------------------- */
-
-  const tradesRef = useRef<Record<number, { req_id: number }>>({});
-
+  /* PLACE TRADE */
   const placeTrade = (type: TradeType, duration: number) => {
-    if (!connected || !authorizedRef.current)
-      return alert("Not connected");
-
-    if (selectedDigit === null) return alert("Select a digit");
+    if (!connected) return alert("Not connected");
+    if (selectedDigit === null) return alert("Select digit");
 
     const req_id = newReqId();
 
@@ -286,25 +253,19 @@ export default function DashboardPage() {
     });
   };
 
-  const on3xSelectedDigit = () => {
+  const on3xSelectedDigit = async () => {
     if (instant3xRunning) return;
 
     setInstant3xRunning(true);
-    let count = 0;
 
-    const cycle = async () => {
-      try {
-        while (count < 3) {
-          placeTrade("Differs", mdTickDuration);
-          count++;
-          if (!turboMode) await new Promise((r) => setTimeout(r, 60));
-        }
-      } finally {
-        setInstant3xRunning(false);
+    try {
+      for (let i = 0; i < 3; i++) {
+        placeTrade("Differs", mdTickDuration);
+        if (!turboMode) await new Promise((r) => setTimeout(r, 60));
       }
-    };
-
-    cycle();
+    } finally {
+      setInstant3xRunning(false);
+    }
   };
 
   const toggle5x = () => {
@@ -314,10 +275,7 @@ export default function DashboardPage() {
     );
   };
 
-  /* ================================================================
-     UI RENDER
-  ================================================================== */
-
+  /* RENDER */
   return (
     <div className="min-h-screen bg-[#0b0c11] text-white p-6">
 
@@ -338,18 +296,12 @@ export default function DashboardPage() {
                 onChange={(e) => setToken(e.target.value)}
                 className="bg-black/40 px-3 py-2 rounded-md border border-white/20"
               />
-              <button
-                onClick={connectDeriv}
-                className="bg-indigo-500 px-4 py-2 rounded-md"
-              >
+              <button onClick={connectDeriv} className="bg-indigo-500 px-4 py-2 rounded-md">
                 Connect
               </button>
             </>
           ) : (
-            <button
-              onClick={disconnect}
-              className="bg-red-500 px-4 py-2 rounded-md"
-            >
+            <button onClick={disconnect} className="bg-red-500 px-4 py-2 rounded-md">
               Disconnect
             </button>
           )}
