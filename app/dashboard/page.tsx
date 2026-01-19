@@ -15,6 +15,14 @@ export const INDEX_GROUPS = {
     { code: "R_75", label: "Volatility 75 Index" },
     { code: "R_100", label: "Volatility 100 Index" },
   ],
+
+  jump: [
+    { code: "JD10", label: "Jump 10 Index" },
+    { code: "JD25", label: "Jump 25 Index" },
+    { code: "JD50", label: "Jump 50 Index" },
+    { code: "JD75", label: "Jump 75 Index" },
+    { code: "JD100", label: "Jump 100 Index" },
+  ],
 };
 
 export const PAIRS = [
@@ -23,6 +31,13 @@ export const PAIRS = [
   "R_50",
   "R_75",
   "R_100",
+
+  // 🚀 Jump
+  "JD10",
+  "JD25",
+  "JD50",
+  "JD75",
+  "JD100",
 ] as const;
 
 export type Pair = (typeof PAIRS)[number];
@@ -136,6 +151,8 @@ export default function Dashboard() {
 
   const wsRef = useRef<WebSocket | null>(null);
   const authorizedRef = useRef(false);
+  const activeStrategyRef = useRef<"matches" | "overunder" | null>(null);
+  const selectedPairRef = useRef<Pair>(PAIRS[0]);
 
   // ✅ force-remount MetroX panel (resets its local analysis state)
   const [metroXResetKey, setMetroXResetKey] = useState(0);
@@ -165,6 +182,8 @@ export default function Dashboard() {
 
   // 5x autotrade cancellation + time limit
   const auto5xCancelRef = useRef(false);
+  // ✅ prevent 1x Auto from trading the same pair back-to-back
+const lastAuto1xPairRef = useRef<Pair | null>(null);
 
   const [token, setToken] = useState("");
   const [connected, setConnected] = useState(false);
@@ -177,8 +196,13 @@ export default function Dashboard() {
   const [ticks, setTicks] = useState<number[]>([]);
 
   const [activeStrategy, setActiveStrategy] = useState<"matches" | "overunder" | null>(null);
-
+useEffect(() => {
+  activeStrategyRef.current = activeStrategy;
+}, [activeStrategy]);
   const [selectedPair, setSelectedPair] = useState<Pair>(PAIRS[0]);
+  useEffect(() => {
+  selectedPairRef.current = selectedPair;
+}, [selectedPair]);
   const [stake, setStake] = useState<number>(1);
   const [selectedDigit, setSelectedDigit] = useState<number | null>(null);
 
@@ -260,6 +284,30 @@ const [pairMeta, setPairMeta] = useState(emptyMeta);
   PAIRS.forEach((sym) => {
     safeSend({ ticks: sym, subscribe: 1 });
   });
+};
+const resetPairNow = (p: Pair) => {
+  // 🔄 wipe ALL pair caches
+  pairDigitsRef.current = Object.fromEntries(
+    PAIRS.map((x) => [x, []])
+  ) as unknown as Record<Pair, number[]>;
+
+  // wipe UI
+  setTicks([]);
+  setSelectedDigit(null);
+  setLastWinDigit(null);
+  setLastLossDigit(null);
+
+  // reset analysis UI
+  setAnalysisOpen(false);
+  setAnalysisStatus("");
+
+  // 🔄 reset ALL per-pair meta
+  setPairMeta(
+    Object.fromEntries(PAIRS.map((x) => [x, { count: 0 }])) as unknown as Record<
+      Pair,
+      { count: number; lowDigit?: number; lowPct?: number }
+    >
+  );
 };
 
   const getLast20FromCache = (sym: Pair) => {
@@ -362,32 +410,34 @@ const [pairMeta, setPairMeta] = useState(emptyMeta);
       }
 
       if (data.msg_type === "tick" && data.tick?.quote !== undefined) {
-        const symbol = data.tick.symbol as Pair;
-        if (!PAIRS.includes(symbol)) return;
+  const symbol = data.tick.symbol as Pair;
+  if (!PAIRS.includes(symbol)) return;
 
-        const ps = typeof data.tick.pip_size === "number" ? data.tick.pip_size : pipSize;
-        if (typeof data.tick.pip_size === "number") setPipSize(ps);
+  // ✅ do NOT process ticks unless MetroX is active (closure-safe)
+if (activeStrategyRef.current !== "matches") return;
 
-        const digit = getLastDigit(Number(data.tick.quote), ps);
+  const ps = typeof data.tick.pip_size === "number" ? data.tick.pip_size : pipSize;
+  if (typeof data.tick.pip_size === "number") setPipSize(ps);
 
-        const prev = pairDigitsRef.current[symbol] ?? [];
-        const next = [...prev, digit];
-        if (next.length > 200) next.shift();
-        pairDigitsRef.current[symbol] = next;
+  const digit = getLastDigit(Number(data.tick.quote), ps);
 
-        const last20 = next.slice(-20);
-        if (last20.length >= 20) {
-          const low = lowestDigitFromList(last20);
-          setPairMeta((m) => ({
-            ...m,
-            [symbol]: { count: next.length, lowDigit: low.digit, lowPct: low.percent },
-          }));
-        } else {
-          setPairMeta((m) => ({ ...m, [symbol]: { ...m[symbol], count: next.length } }));
-        }
+  const prev = pairDigitsRef.current[symbol] ?? [];
+const next = [...prev, digit]; // ❌ no cap anymore
+pairDigitsRef.current[symbol] = next;
 
-        if (symbol === selectedPair) setTicks(next);
-      }
+  const last20 = next.slice(-20);
+  if (last20.length >= 20) {
+    const low = lowestDigitFromList(last20);
+    setPairMeta((m) => ({
+      ...m,
+      [symbol]: { count: next.length, lowDigit: low.digit, lowPct: low.percent },
+    }));
+  } else {
+    setPairMeta((m) => ({ ...m, [symbol]: { ...m[symbol], count: next.length } }));
+  }
+
+  if (symbol === selectedPairRef.current) setTicks(next);
+}
 
       // proposal -> buy
       if (data.msg_type === "proposal") {
@@ -486,12 +536,6 @@ const [pairMeta, setPairMeta] = useState(emptyMeta);
     localStorage.clear();
     router.replace("/");
   };
-
-  useEffect(() => {
-    const arr = pairDigitsRef.current[selectedPair] ?? [];
-    setTicks(arr);
-    setSelectedDigit(null);
-  }, [selectedPair]);
 
   /* ================= TRADE PLACEMENT ================= */
 
@@ -606,105 +650,101 @@ const [pairMeta, setPairMeta] = useState(emptyMeta);
   /* ================= 5x AutoTrading ================= */
 
   const toggle5xAutoTrading = async () => {
-    if (auto5xRunning) {
-      auto5xCancelRef.current = true;
-      setAnalysisStatus("Stopping...");
-      return;
-    }
-
-    if (!stake || stake <= 0) return alert("Enter a stake amount");
-    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return alert("WebSocket not connected yet");
-    if (!authorizedRef.current) return alert("Not authorized yet");
-
-    auto5xCancelRef.current = false;
-    setAuto5xRunning(true);
-
-    const gapMs = turboMode ? 0 : 50;
-    const deadline = Date.now() + 5000;
-
-    try {
-      setAnalysisStatus("Starting 5x AutoTrading (max 5s)...");
-
-      const usedPairs = new Set<Pair>();
-      let placed = 0;
-
-      /* ======= NEW PRIORITIZED 5× AUTOTRADING LOGIC ======= */
-
-setAnalysisStatus("Analyzing all pairs...");
-
-// Step 1 — Build signals for each pair
-const pairSignals = PAIRS.map((pair) => {
-  const digits = pairDigitsRef.current[pair] ?? [];
-
-  if (digits.length < 20) {
-    return { pair, lowestPct: Infinity, lowestDigit: null };
+  if (auto5xRunning) {
+    auto5xCancelRef.current = true;
+    setAnalysisStatus("Stopping...");
+    return;
   }
 
-  // Count appearances
-  const freq = Array.from({ length: 10 }, () => 0);
-  for (const d of digits.slice(-20)) freq[d]++;
+  if (!stake || stake <= 0) return alert("Enter a stake amount");
+  if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN)
+    return alert("WebSocket not connected yet");
+  if (!authorizedRef.current) return alert("Not authorized yet");
 
-  const percentages = freq.map((f) => (f / 20) * 100);
+  auto5xCancelRef.current = false;
+  setAuto5xRunning(true);
 
-  // Find lowest digit + pct
-  let lowestDigit = 0;
-  let lowestPct = percentages[0];
-  for (let i = 1; i < 10; i++) {
-    if (percentages[i] < lowestPct) {
-      lowestPct = percentages[i];
-      lowestDigit = i;
-    }
-  }
-
-  return { pair, lowestPct, lowestDigit };
-});
-
-// Step 2 — Sort strongest → weakest
-pairSignals.sort((a, b) => a.lowestPct - b.lowestPct);
-
-// Step 3 — Pick best
-const best = pairSignals[0];
-
-if (best.lowestPct <= 5.0 && best.lowestDigit !== null) {
-  setAnalysisStatus(
-    `Best pair: ${best.pair} • Digit: ${best.lowestDigit} • ${best.lowestPct.toFixed(1)}%`
-  );
+  const gapMs = turboMode ? 0 : 50;
+  const deadline = Date.now() + 5000;
 
   try {
-    const result = await placeDiffersAndWaitBuyAck(best.pair, best.lowestDigit);
+    setAnalysisStatus("Analyzing all pairs...");
 
-    // Step 4 — Stop AFTER 1 loss
-    const lastTrade = tradeHistoryMatches[0];
-    if (lastTrade?.result === "Loss") {
-      setAnalysisStatus("AutoTrading stopped — first trade was a LOSS.");
-      auto5xCancelRef.current = true;
-      return;
-    }
+    // Build signals for each pair
+    const pairSignals = PAIRS.map((pair) => {
+      const digits = pairDigitsRef.current[pair] ?? [];
 
-    setAnalysisStatus("First trade completed — win detected. AutoTrading finished.");
-  } catch (err) {
-    setAnalysisStatus("Trade could not be placed.");
-  }
-} else {
-  setAnalysisStatus("No valid signals ≤ 5.0%");
-}
-
-      if (auto5xCancelRef.current) {
-        setAnalysisStatus(`Stopped by user. Trades placed: ${placed}/5`);
-      } else if (placed === 0) {
-        setAnalysisStatus("No trades placed within 5 seconds (all pairs > 8.0% or not enough cached ticks).");
-      } else if (placed < 5) {
-        setAnalysisStatus(`Finished (time limit reached). Trades placed: ${placed}/5`);
-      } else {
-        setAnalysisStatus("5x AutoTrading completed (5/5).");
+      if (digits.length < 20) {
+        return { pair, lowestPct: Infinity, lowestDigit: null as number | null };
       }
-    } catch (err) {
-      setAnalysisStatus(err instanceof Error ? err.message : "AutoTrading error.");
-    } finally {
-      setAuto5xRunning(false);
-      auto5xCancelRef.current = false;
+
+      const last20 = digits.slice(-20);
+      const freq = Array.from({ length: 10 }, () => 0);
+      for (const d of last20) freq[d]++;
+
+      const percentages = freq.map((f) => (f / 20) * 100);
+
+      let lowestDigit = 0;
+      let lowestPct = percentages[0];
+      for (let i = 1; i < 10; i++) {
+        if (percentages[i] < lowestPct) {
+          lowestPct = percentages[i];
+          lowestDigit = i;
+        }
+      }
+
+      return { pair, lowestPct, lowestDigit };
+    });
+
+    // Strongest → weakest
+    pairSignals.sort((a, b) => a.lowestPct - b.lowestPct);
+
+    const usedPairs = new Set<Pair>();
+    let placed = 0;
+
+    const THRESHOLD = 3.0;
+
+    // Place up to 5 trades, max 1 per pair, only if <= 3.0%
+    for (const s of pairSignals) {
+      if (auto5xCancelRef.current) break;
+      if (Date.now() > deadline) break;
+      if (placed >= 5) break;
+
+      if (usedPairs.has(s.pair)) continue;
+      if (s.lowestDigit === null) continue;
+      if (s.lowestPct > THRESHOLD) continue;
+
+      setAnalysisStatus(
+        `5x Auto: ${s.pair} • Digit ${s.lowestDigit} • ${s.lowestPct.toFixed(1)}% (${placed + 1}/5)`
+      );
+
+      try {
+        await placeDiffersAndWaitBuyAck(s.pair, s.lowestDigit);
+        usedPairs.add(s.pair);
+        placed++;
+
+        if (gapMs) await sleep(gapMs);
+      } catch {
+        setAnalysisStatus(`Skipped ${s.pair} (trade failed). Continuing...`);
+      }
     }
-  };
+
+    if (auto5xCancelRef.current) {
+      setAnalysisStatus(`Stopped by user. Trades placed: ${placed}/5`);
+    } else if (placed === 0) {
+      setAnalysisStatus(`No trades placed (no pairs ≤ ${THRESHOLD.toFixed(1)}%).`);
+    } else if (placed < 5) {
+      setAnalysisStatus(`Finished (time limit reached). Trades placed: ${placed}/5`);
+    } else {
+      setAnalysisStatus("5x AutoTrading completed (5/5).");
+    }
+  } catch (err) {
+    setAnalysisStatus(err instanceof Error ? err.message : "AutoTrading error.");
+  } finally {
+    setAuto5xRunning(false);
+    auto5xCancelRef.current = false;
+  }
+};
 /* ================= 1x Auto All Pairs ================= */
 
 const run1xAutoAllPairs = async () => {
@@ -723,7 +763,7 @@ const run1xAutoAllPairs = async () => {
       const digits = pairDigitsRef.current[pair] ?? [];
 
       if (digits.length < 20)
-        return { pair, lowestPct: Infinity, lowestDigit: null };
+        return { pair, lowestPct: Infinity, lowestDigit: null as number | null };
 
       const last20 = digits.slice(-20);
       const freq = Array.from({ length: 10 }, () => 0);
@@ -744,15 +784,27 @@ const run1xAutoAllPairs = async () => {
 
     pairSignals.sort((a, b) => a.lowestPct - b.lowestPct);
 
-    const best = pairSignals[0];
+    const lastPair = lastAuto1xPairRef.current;
+
+    // pick best that is NOT the same as last time
+    const best =
+      pairSignals.find((s) => s.pair !== lastPair) ?? pairSignals[0];
 
     if (best.lowestPct < 3.0 && best.lowestDigit !== null) {
+      if (best.pair === lastPair) {
+        setAnalysisStatus(
+          "No valid pairs < 3.0% (best signal repeats last pair) — no trade placed."
+        );
+        return;
+      }
+
       setAnalysisStatus(
         `1x Auto: ${best.pair} • Digit ${best.lowestDigit} • ${best.lowestPct.toFixed(1)}%`
       );
 
       try {
         await placeDiffersAndWaitBuyAck(best.pair, best.lowestDigit);
+        lastAuto1xPairRef.current = best.pair; // ✅ remember
         setAnalysisStatus("1x Auto trade placed.");
       } catch {
         setAnalysisStatus("Trade failed.");
@@ -780,17 +832,29 @@ const run1xAutoAllPairs = async () => {
 
   // remount MetroX panel when strategy changes
   useEffect(() => {
-    setMetroXResetKey((k) => k + 1);
+  setMetroXResetKey((k) => k + 1);
 
-    if (activeStrategy !== "matches") {
-      setSelectedDigit(null);
-      setAnalysisOpen(false);
-      setAnalysisStatus("");
-      setLastWinDigit(null);
-      setLastLossDigit(null);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeStrategy]);
+  if (activeStrategy !== "matches") {
+    // 🔄 full reset when MetroX is OFF
+    pairDigitsRef.current = Object.fromEntries(
+      PAIRS.map((p) => [p, []])
+    ) as unknown as Record<Pair, number[]>;
+
+    setTicks([]);
+    setSelectedDigit(null);
+    setAnalysisOpen(false);
+    setAnalysisStatus("");
+    setLastWinDigit(null);
+    setLastLossDigit(null);
+
+    setPairMeta(
+      Object.fromEntries(PAIRS.map((p) => [p, { count: 0 }])) as unknown as Record<
+        Pair,
+        { count: number; lowDigit?: number; lowPct?: number }
+      >
+    );
+  }
+}, [activeStrategy]);
 
   // ✅ prevent UI showing before auth is checked
   if (!authChecked) {
@@ -954,9 +1018,9 @@ const run1xAutoAllPairs = async () => {
                 setSelectedDigit={setSelectedDigit}
                 selectedPair={selectedPair}
                 setSelectedPair={(p: Pair) => {
-                  setSelectedPair(p);
-                  setSelectedDigit(null);
-                }}
+  resetPairNow(p);
+  setSelectedPair(p);
+}}
                 mdTradeType={mdTradeType}
                 setMdTradeType={setMdTradeType}
                 mdTickDuration={mdTickDuration}
@@ -992,7 +1056,10 @@ const run1xAutoAllPairs = async () => {
                   stake={stake}
                   setStake={setStake}
                   selectedPair={selectedPair}
-                  setSelectedPair={(p: Pair) => setSelectedPair(p)}
+                  setSelectedPair={(p: Pair) => {
+  resetPairNow(p);
+  setSelectedPair(p);
+}}
                   tradeHistory={tradeHistoryOverUnder}
                   placeTrade={(t: TradeType) => placeTrade(t, 1)}
                 />
@@ -1213,6 +1280,14 @@ function MetroXPanel({
       </option>
     ))}
   </optgroup>
+
+  <optgroup label="Jump Indices">
+    {INDEX_GROUPS.jump.map((s) => (
+      <option key={s.code} value={s.code}>
+        {s.label}
+      </option>
+    ))}
+  </optgroup>
 </select>
         </div>
 
@@ -1388,7 +1463,7 @@ function MetroXPanel({
         </div>
 
         <p className="text-xs text-white/50 mt-3">
-          Based on {ticks.length} ticks from <span className="font-semibold">{selectedPair}</span> • Last Digit:{" "}
+          Based on {ticks.length} ticks from <span className="font-semibold">{selectedPair}</span>• Last Digit:{" "}
           <span className="text-green-400 font-semibold">{lastDigit !== null ? lastDigit : "-"}</span>
         </p>
 
@@ -1447,7 +1522,7 @@ function MetroXPanel({
       <span className="font-semibold">{label}</span>
 
       <span className="text-white/60">
-        {Math.min(m.count, 200)}/200 cached •{" "}
+        {m.count} cached •{" "}
         {has20 && m.lowDigit !== undefined && m.lowPct !== undefined
           ? `lowest: ${m.lowDigit} (${m.lowPct.toFixed(1)}%)`
           : "waiting for 20 ticks..."}
