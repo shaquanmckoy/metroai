@@ -172,8 +172,8 @@ export default function Dashboard() {
 
   // req_id -> info
   const reqInfoRef = useRef<
-    Record<number, { symbol: Pair; digit: number; type: TradeType; stake: number }>
-  >({});
+  Record<number, { symbol: Pair; digit: number; type: TradeType; stake: number; turbo?: boolean }>
+>({});
 
   // ✅ flash digit result (win/loss) for 2 seconds
   const flashTimerRef = useRef<number | null>(null);
@@ -251,6 +251,66 @@ const [pairMeta, setPairMeta] = useState(emptyMeta);
   };
 
   const newReqId = () => Date.now() + Math.floor(Math.random() * 1000);
+  // ================= BUY QUEUE (prevents stuck Pending in Turbo) =================
+const buyQueueRef = useRef<Array<{ req_id: number; proposalId: string; price: number }>>([]);
+const buyWorkerRunningRef = useRef(false);
+
+const enqueueBuy = (req_id: number, proposalId: string, price: number) => {
+  buyQueueRef.current.push({ req_id, proposalId, price });
+  void runBuyWorker();
+};
+
+const runBuyWorker = async () => {
+  if (buyWorkerRunningRef.current) return;
+  buyWorkerRunningRef.current = true;
+
+  try {
+    while (buyQueueRef.current.length) {
+      const item = buyQueueRef.current.shift();
+      if (!item) break;
+
+      const { req_id, proposalId, price } = item;
+
+      // Create a waiter for THIS buy (works for turbo too)
+      const ack = new Promise<void>((resolve, reject) => {
+        buyAckWaitersRef.current[req_id] = {
+          resolve,
+          reject: (msg: string) => reject(new Error(msg)),
+        };
+      });
+
+      safeSend({ buy: proposalId, price, req_id });
+
+      // Wait for buy ack or timeout
+      try {
+        await Promise.race([
+          ack,
+          new Promise<void>((_, reject) => setTimeout(() => reject(new Error("Buy ack timeout")), 8000)),
+        ]);
+      } catch {
+        // Mark as failed so it doesn't stay Pending forever
+        const fail = (arr: Trade[]): Trade[] =>
+  arr.map((t) =>
+    t.id === req_id && t.result === "Pending"
+      ? {
+          ...t,
+          result: "Loss" as TradeResult, // ✅ force correct union type
+          profit: 0,
+          payout: 0,
+        }
+      : t
+  );
+        setTradeHistoryMatches((prev) => fail(prev));
+        setTradeHistoryOverUnder((prev) => fail(prev));
+      }
+
+      // Small gap between BUYs (Turbo-safe). If you still see issues, increase to 250.
+      await sleep(turboMode ? 150 : 80);
+    }
+  } finally {
+    buyWorkerRunningRef.current = false;
+  }
+};
 
   // ✅ robust last digit (handles 0 correctly)
   const getLastDigit = (quote: number, pip: number) => {
@@ -382,19 +442,21 @@ const resetPairNow = (p: Pair) => {
 
       // ignore harmless already subscribed message
       if (data?.error?.message) {
-        const msg: string = data.error.message;
-        if (msg.toLowerCase().includes("already subscribed")) return;
+  const msg: string = data.error.message;
+  const req_id: number | undefined = data.req_id;
 
-        const req_id: number | undefined = data.req_id;
-        if (req_id && buyAckWaitersRef.current[req_id]) {
-          buyAckWaitersRef.current[req_id].reject(msg);
-          delete buyAckWaitersRef.current[req_id];
-          return;
-        }
+  // If a waiter exists, always reject it (turbo or not)
+  if (req_id && buyAckWaitersRef.current[req_id]) {
+    buyAckWaitersRef.current[req_id].reject(msg);
+    delete buyAckWaitersRef.current[req_id];
+  }
 
-        alert(msg);
-        return;
-      }
+  // Turbo: do NOT alert (but we did reject waiters so queue doesn't hang)
+  if (req_id && reqInfoRef.current[req_id]?.turbo) return;
+
+  alert(msg);
+  return;
+}
 
       if (data.msg_type === "authorize") {
         authorizedRef.current = true;
@@ -441,18 +503,23 @@ pairDigitsRef.current[symbol] = next;
 
       // proposal -> buy
       if (data.msg_type === "proposal") {
-        const req_id: number | undefined = data.req_id;
-        const proposalId: string | undefined = data.proposal?.id;
-        if (!req_id || !proposalId) return;
+  const req_id: number | undefined = data.req_id;
+  const proposalId: string | undefined = data.proposal?.id;
+  if (!req_id || !proposalId) return;
 
-        const stakeForReq = reqInfoRef.current[req_id]?.stake ?? stake;
+  const info = reqInfoRef.current[req_id];
+  const stakeForReq = info?.stake ?? stake;
 
-        safeSend({
-          buy: proposalId,
-          price: stakeForReq,
-          req_id,
-        });
-      }
+  // ⚡ Turbo trades → BUY QUEUE
+  if (info?.turbo) {
+    enqueueBuy(req_id, proposalId, stakeForReq);
+  } else {
+    // ✅ Non-turbo trades (3x, manual, MetroX) → immediate BUY (old behavior)
+    safeSend({ buy: proposalId, price: stakeForReq, req_id });
+  }
+
+  return;
+}
 
       // buy ack
       if (data.msg_type === "buy") {
@@ -578,6 +645,52 @@ pairDigitsRef.current[symbol] = next;
   };
 
   // Place one DIFFERS trade for symbol+digit and wait for buy-ack (safe for fast bursts)
+  // ⚡ Instant parallel DIFFERS (no waiting)
+const placeDiffersInstant = async (symbol: Pair, digit: number, count: number) => {
+  if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+  if (!authorizedRef.current) return;
+
+  for (let i = 0; i < count; i++) {
+    const req_id = newReqId();
+
+    const trade: Trade = {
+      id: req_id,
+      symbol,
+      digit,
+      type: "Differs",
+      stake,
+      durationTicks: 1,
+      result: "Pending",
+      createdAt: Date.now(),
+    };
+
+    setTradeHistoryMatches((prev) => [trade, ...prev]);
+
+    reqInfoRef.current[req_id] = {
+  symbol,
+  digit,
+  type: "Differs",
+  stake,
+  turbo: true,
+};
+
+    safeSend({
+      proposal: 1,
+      amount: stake,
+      basis: "stake",
+      contract_type: CONTRACT_TYPE_MAP["Differs"],
+      currency: currency || "USD",
+      symbol,
+      duration: mdTickDuration,
+      duration_unit: "t",
+      barrier: String(digit),
+      req_id,
+    });
+
+    // ⚡ CRITICAL: yield event loop so Deriv processes each proposal separately
+    await new Promise((r) => setTimeout(r, 0));
+  }
+};
   const placeDiffersAndWaitBuyAck = async (symbol: Pair, digit: number) => {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) throw new Error("WebSocket not connected");
     if (!authorizedRef.current) throw new Error("Not authorized");
@@ -626,26 +739,30 @@ pairDigitsRef.current[symbol] = next;
 
   /* ================= 3x Selected Digit ================= */
 
-  const place3xSelectedDigit = async () => {
-    if (instant3xRunning) return;
-    if (selectedDigit === null) return alert("Select a digit first");
-    if (!stake || stake <= 0) return alert("Enter a stake amount");
+ const place3xSelectedDigit = async () => {
+  if (instant3xRunning) return;
+  if (selectedDigit === null) return alert("Select a digit first");
+  if (!stake || stake <= 0) return alert("Enter a stake amount");
 
-    setInstant3xRunning(true);
-    const gapMs = turboMode ? 0 : 50;
+  setInstant3xRunning(true);
 
-    try {
-      await placeDiffersAndWaitBuyAck(selectedPair, selectedDigit);
-      if (gapMs) await sleep(gapMs);
-      await placeDiffersAndWaitBuyAck(selectedPair, selectedDigit);
-      if (gapMs) await sleep(gapMs);
-      await placeDiffersAndWaitBuyAck(selectedPair, selectedDigit);
-    } catch (err) {
-      alert(err instanceof Error ? err.message : "We couldn't process your trade.");
-    } finally {
-      setInstant3xRunning(false);
-    }
-  };
+  // 🔁 Old behavior: Turbo only removes delay — does NOT change logic
+  const gapMs = turboMode ? 0 : 50;
+
+  try {
+    await placeDiffersAndWaitBuyAck(selectedPair, selectedDigit);
+    if (gapMs) await sleep(gapMs);
+
+    await placeDiffersAndWaitBuyAck(selectedPair, selectedDigit);
+    if (gapMs) await sleep(gapMs);
+
+    await placeDiffersAndWaitBuyAck(selectedPair, selectedDigit);
+  } catch (err) {
+    alert(err instanceof Error ? err.message : "We couldn't process your trade.");
+  } finally {
+    setInstant3xRunning(false);
+  }
+};
 
   /* ================= 5x AutoTrading ================= */
 
@@ -719,15 +836,20 @@ pairDigitsRef.current[symbol] = next;
       );
 
       try {
-        await placeDiffersAndWaitBuyAck(s.pair, s.lowestDigit);
-        usedPairs.add(s.pair);
-        placed++;
+  if (turboMode) {
+    // ⚡ MAX TURBO — no waiting
+    placeDiffersInstant(s.pair, s.lowestDigit, 1);
+  } else {
+    await placeDiffersAndWaitBuyAck(s.pair, s.lowestDigit);
+    if (gapMs) await sleep(gapMs);
+  }
 
-        if (gapMs) await sleep(gapMs);
-      } catch {
-        setAnalysisStatus(`Skipped ${s.pair} (trade failed). Continuing...`);
-      }
-    }
+  usedPairs.add(s.pair);
+  placed++;
+} catch {
+  setAnalysisStatus(`Skipped ${s.pair} (trade failed). Continuing...`);
+}
+}
 
     if (auto5xCancelRef.current) {
       setAnalysisStatus(`Stopped by user. Trades placed: ${placed}/5`);
@@ -803,12 +925,18 @@ const run1xAutoAllPairs = async () => {
       );
 
       try {
-        await placeDiffersAndWaitBuyAck(best.pair, best.lowestDigit);
-        lastAuto1xPairRef.current = best.pair; // ✅ remember
-        setAnalysisStatus("1x Auto trade placed.");
-      } catch {
-        setAnalysisStatus("Trade failed.");
-      }
+  if (turboMode) {
+    // ⚡ MAX TURBO
+    placeDiffersInstant(best.pair, best.lowestDigit, 1);
+  } else {
+    await placeDiffersAndWaitBuyAck(best.pair, best.lowestDigit);
+  }
+
+  lastAuto1xPairRef.current = best.pair; // ✅ remember
+  setAnalysisStatus("1x Auto trade placed.");
+} catch {
+  setAnalysisStatus("Trade failed.");
+}
     } else {
       setAnalysisStatus("No valid pairs < 3.0% — no trade placed.");
     }
@@ -1544,7 +1672,7 @@ function MetroXPanel({
             if (selectedDigit === null) return alert("Select a digit first");
             onPlaceMetroX();
           }}
-          className="w-full rounded-md py-3 bg-emerald-600 hover:bg-emerald-700 text-sm font-semibold shadow-[0_0_0_1px_rgba(255,255,255,0.10)]"
+          className="w-full rounded-md py-3 bg-emerald-600 hover:bg-emerald-700 text-sm font-semibold shadow-[0_0_0_1px_rgba(255,255,255,0.10)] active:scale-[0.98] active:brightness-110 transition"
         >
           ⚡ Place MetroX Trade
         </button>
@@ -1552,27 +1680,33 @@ function MetroXPanel({
         <button
           onClick={on3xSelectedDigit}
           disabled={instant3xRunning}
-          className={`w-full rounded-md py-3 text-sm font-semibold shadow-[0_0_0_1px_rgba(255,255,255,0.10)] ${
-            instant3xRunning ? "bg-slate-600 cursor-not-allowed" : "bg-red-600 hover:bg-red-700"
-          }`}
+          className={`w-full rounded-md py-3 text-sm font-semibold shadow-[0_0_0_1px_rgba(255,255,255,0.10)] transition active:scale-[0.98] ${
+  instant3xRunning
+    ? "bg-slate-600 cursor-not-allowed animate-pulse"
+    : "bg-red-600 hover:bg-red-700 active:brightness-110"
+}`}
         >
           {instant3xRunning ? "Placing 3 trades..." : "3x Selected Digit"}
         </button>
 
         <button
           onClick={onToggle5x}
-          className={`w-full rounded-md py-3 text-sm font-semibold shadow-[0_0_0_1px_rgba(255,255,255,0.10)] ${
-            auto5xRunning ? "bg-orange-600 hover:bg-orange-700" : "bg-purple-600 hover:bg-purple-700"
-          }`}
+          className={`w-full rounded-md py-3 text-sm font-semibold shadow-[0_0_0_1px_rgba(255,255,255,0.10)] transition active:scale-[0.98] ${
+  auto5xRunning
+    ? "bg-orange-600 hover:bg-orange-700 animate-pulse"
+    : "bg-purple-600 hover:bg-purple-700 active:brightness-110"
+}`}
         >
           {auto5xRunning ? "Stop 5x AutoTrading" : "5x AutoTrading"}
         </button>
         <button
   onClick={run1xAutoAllPairs}
   disabled={auto1xRunning}
-  className={`w-full rounded-md py-3 text-sm font-semibold shadow-[0_0_0_1px_rgba(255,255,255,0.10)] ${
-    auto1xRunning ? "bg-slate-600 cursor-not-allowed" : "bg-indigo-600 hover:bg-indigo-700"
-  }`}
+  className={`w-full rounded-md py-3 text-sm font-semibold shadow-[0_0_0_1px_rgba(255,255,255,0.10)] transition active:scale-[0.98] ${
+  auto1xRunning
+    ? "bg-slate-600 cursor-not-allowed animate-pulse"
+    : "bg-indigo-600 hover:bg-indigo-700 active:brightness-110"
+}`}
 >
   {auto1xRunning ? "Scanning..." : "1x Auto All Pairs"}
 </button>
