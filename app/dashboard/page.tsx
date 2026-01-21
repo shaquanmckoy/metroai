@@ -129,13 +129,38 @@ export default function Dashboard() {
     }
 
     // ✅ allow admin to stay on dashboard too
-    const admin = role === "admin";
-    setIsAdmin(admin);
+const admin = role === "admin";
+setIsAdmin(admin);
 
-    // ✅ load flags (used for non-admin users)
+// ✅ ALWAYS load flags on login
+(async () => {
+  const local = localStorage.getItem("strategy_flags");
+
+  if (local) {
+    // we already have them
     setStrategyFlags(readStrategyFlags());
+  } else {
+    // ❗ fetch from server if missing
+    try {
+      const res = await fetch("/api/admin/strategies", { cache: "no-store" });
+      const data = await res.json();
 
-    setAuthChecked(true);
+      if (data?.ok && data.flags) {
+        // save to localStorage for future use
+        localStorage.setItem("strategy_flags", JSON.stringify(data.flags));
+        setStrategyFlags(data.flags);
+      } else {
+        setStrategyFlags(DEFAULT_FLAGS);
+      }
+    } catch {
+      setStrategyFlags(DEFAULT_FLAGS);
+    }
+  }
+
+  setAuthChecked(true);
+})();
+
+setAuthChecked(true);
   }, [router]);
 
   // ✅ live-update if admin changes flags in another tab/page
@@ -203,8 +228,23 @@ useEffect(() => {
   useEffect(() => {
   selectedPairRef.current = selectedPair;
 }, [selectedPair]);
+// 🛑 stop Fast AutoTrading when switching index
+useEffect(() => {
+  if (fastAutoRunning) {
+    fastAutoCancelRef.current = true;
+    setFastAutoRunning(false);
+    setAnalysisStatus("Fast AutoTrading stopped (index changed).");
+  }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+}, [selectedPair]);
   const [stake, setStake] = useState<number>(1);
   const [selectedDigit, setSelectedDigit] = useState<number | null>(null);
+  // ✅ keep latest selected digit for Fast Auto loop
+const selectedDigitRef = useRef<number | null>(null);
+
+useEffect(() => {
+  selectedDigitRef.current = selectedDigit;
+}, [selectedDigit]);
 
   // MetroX controls
   const [mdTradeType, setMdTradeType] = useState<"Differs" | "Matches">("Differs");
@@ -219,6 +259,10 @@ useEffect(() => {
   const [auto5xRunning, setAuto5xRunning] = useState(false);
   const [auto1xRunning, setAuto1xRunning] = useState(false);
   const [analysisStatus, setAnalysisStatus] = useState<string>("");
+  // ✅ Fast AutoTrading (NEW)
+const [fastAutoRunning, setFastAutoRunning] = useState(false);
+const fastAutoCancelRef = useRef(false);
+const fastAutoLoopRunningRef = useRef(false);
 
   // collapsible analysis box
   const [analysisOpen, setAnalysisOpen] = useState(false);
@@ -591,12 +635,16 @@ pairDigitsRef.current[symbol] = next;
   };
 
   const disconnect = () => {
-    wsRef.current?.close();
-    wsRef.current = null;
-    setConnected(false);
-    setBalance(null);
-    authorizedRef.current = false;
-  };
+  // stop fast auto if running
+  fastAutoCancelRef.current = true;
+  setFastAutoRunning(false);
+
+  wsRef.current?.close();
+  wsRef.current = null;
+  setConnected(false);
+  setBalance(null);
+  authorizedRef.current = false;
+};
 
   const logout = () => {
     disconnect();
@@ -944,6 +992,68 @@ const run1xAutoAllPairs = async () => {
     setAuto1xRunning(false);
   }
 };
+/* ================= Fast AutoTrading (NEW) ================= */
+
+const FAST_INTERVAL_MS_NORMAL = 400; // 0.4s as requested
+const FAST_INTERVAL_MS_TURBO = 250;  // recommended faster in Turbo
+const FAST_MAX_BUY_QUEUE = 12;       // safety limit
+
+const toggleFastAutoTrading = async () => {
+  // STOP
+  if (fastAutoRunning) {
+    fastAutoCancelRef.current = true;
+    setAnalysisStatus("Stopping Fast AutoTrading...");
+    return;
+  }
+
+  // START validations
+  if (selectedDigit === null) return alert("Select a digit first");
+  if (!stake || stake <= 0) return alert("Enter a stake amount");
+  if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN)
+    return alert("WebSocket not connected");
+  if (!authorizedRef.current) return alert("Not authorized");
+
+  fastAutoCancelRef.current = false;
+  setFastAutoRunning(true);
+  setAnalysisStatus("Fast AutoTrading started...");
+
+  if (fastAutoLoopRunningRef.current) return;
+  fastAutoLoopRunningRef.current = true;
+
+  try {
+    while (!fastAutoCancelRef.current) {
+      const ws = wsRef.current;
+      if (!ws || ws.readyState !== WebSocket.OPEN || !authorizedRef.current) break;
+
+      const d = selectedDigitRef.current;
+      if (d === null) {
+        setAnalysisStatus("Fast AutoTrading paused: select a digit.");
+        await sleep(250);
+        continue;
+      }
+
+      const sym = selectedPairRef.current;
+
+      // backpressure protection
+      if (buyQueueRef.current.length > FAST_MAX_BUY_QUEUE) {
+        setAnalysisStatus(`Fast AutoTrading waiting... (queue ${buyQueueRef.current.length})`);
+        await sleep(150);
+        continue;
+      }
+
+      // 🔥 ALWAYS DIFFERS
+      placeDiffersInstant(sym, d, 1);
+
+      const interval = turboMode ? FAST_INTERVAL_MS_TURBO : FAST_INTERVAL_MS_NORMAL;
+      await sleep(interval);
+    }
+  } finally {
+    fastAutoLoopRunningRef.current = false;
+    fastAutoCancelRef.current = false;
+    setFastAutoRunning(false);
+    setAnalysisStatus("Fast AutoTrading stopped.");
+  }
+};
   // ✅ enforce strategy availability for USERS (NEW)
   const isStrategyEnabledForViewer = (key: StrategyKey) => {
     if (isAdmin) return true;
@@ -963,6 +1073,9 @@ const run1xAutoAllPairs = async () => {
   setMetroXResetKey((k) => k + 1);
 
   if (activeStrategy !== "matches") {
+    // 🛑 stop Fast AutoTrading when leaving MetroX
+  fastAutoCancelRef.current = true;
+  setFastAutoRunning(false);
     // 🔄 full reset when MetroX is OFF
     pairDigitsRef.current = Object.fromEntries(
       PAIRS.map((p) => [p, []])
@@ -1171,6 +1284,8 @@ const run1xAutoAllPairs = async () => {
                 currency={currency}
                 run1xAutoAllPairs={run1xAutoAllPairs}
                 auto1xRunning={auto1xRunning}
+                onToggleFastAuto={toggleFastAutoTrading}
+                fastAutoRunning={fastAutoRunning}
               />
             )}
 
@@ -1283,6 +1398,8 @@ function MetroXPanel({
   currency,
   run1xAutoAllPairs,
   auto1xRunning,
+  onToggleFastAuto,
+  fastAutoRunning,
 }: {
   ticks: number[];
   pipSize: number;
@@ -1326,8 +1443,12 @@ function MetroXPanel({
   onClearHistory: () => void;
 
   currency: string;
+
+  // ✅ NEW PROPS (Fast Auto + 1x Auto)
   run1xAutoAllPairs: () => void;
   auto1xRunning: boolean;
+  onToggleFastAuto: () => void;
+  fastAutoRunning: boolean;
 }) {
   // ✅ use full tick list for % display
   const digitPercent = (d: number) => {
@@ -1703,29 +1824,40 @@ function MetroXPanel({
   onClick={run1xAutoAllPairs}
   disabled={auto1xRunning}
   className={`w-full rounded-md py-3 text-sm font-semibold shadow-[0_0_0_1px_rgba(255,255,255,0.10)] transition active:scale-[0.98] ${
-  auto1xRunning
-    ? "bg-slate-600 cursor-not-allowed animate-pulse"
-    : "bg-indigo-600 hover:bg-indigo-700 active:brightness-110"
-}`}
+    auto1xRunning
+      ? "bg-slate-600 cursor-not-allowed animate-pulse"
+      : "bg-indigo-600 hover:bg-indigo-700 active:brightness-110"
+  }`}
 >
   {auto1xRunning ? "Scanning..." : "1x Auto All Pairs"}
 </button>
 
-        <div className="flex items-center justify-between px-2 text-xs text-white/70">
-          <span>Turbo Mode</span>
-          <button
-            onClick={() => setTurboMode(!turboMode)}
-            className={`w-12 h-6 rounded-full relative border transition ${
-              turboMode ? "bg-orange-500/70 border-orange-400/60" : "bg-white/10 border-white/15"
-            }`}
-          >
-            <span
-              className={`absolute top-0.5 w-5 h-5 bg-white rounded-full transition ${
-                turboMode ? "right-0.5" : "left-0.5"
-              }`}
-            />
-          </button>
-        </div>
+<button
+  onClick={onToggleFastAuto}
+  className={`w-full rounded-md py-3 text-sm font-semibold shadow-[0_0_0_1px_rgba(255,255,255,0.10)] transition active:scale-[0.98] ${
+    fastAutoRunning
+      ? "bg-emerald-600 hover:bg-emerald-700 animate-pulse active:brightness-110"
+      : "bg-cyan-600 hover:bg-cyan-700 active:brightness-110"
+  }`}
+>
+  {fastAutoRunning ? "Stop Fast AutoTrading" : "Fast AutoTrading"}
+</button>
+
+<div className="flex items-center justify-between px-2 text-xs text-white/70">
+  <span>Turbo Mode</span>
+  <button
+    onClick={() => setTurboMode(!turboMode)}
+    className={`w-12 h-6 rounded-full relative border transition ${
+      turboMode ? "bg-orange-500/70 border-orange-400/60" : "bg-white/10 border-white/15"
+    }`}
+  >
+    <span
+      className={`absolute top-0.5 w-5 h-5 bg-white rounded-full transition ${
+        turboMode ? "right-0.5" : "left-0.5"
+      }`}
+    />
+  </button>
+</div>
 
         {analysisStatus && (
           <div className="rounded-lg bg-white/5 border border-white/10 p-3 text-xs text-white/70">{analysisStatus}</div>

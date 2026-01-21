@@ -57,12 +57,20 @@ export default function AdminPage() {
   /* ===================== LOAD / SAVE STRATEGIES ===================== */
 
   async function loadFlags() {
-    try {
-      const res = await fetch("/api/admin/strategies", { cache: "no-store" });
-      const data = await res.json();
-      if (data?.ok) setFlags(data.flags ?? DEFAULT_FLAGS);
-    } catch {}
-  }
+  try {
+    const res = await fetch("/api/admin/strategies", { cache: "no-store" });
+    const data = await res.json();
+
+    if (data?.ok) {
+      const f = data.flags ?? DEFAULT_FLAGS;
+
+      setFlags(f);
+
+      // ✅ CRITICAL: sync to localStorage so Dashboard sees it
+      localStorage.setItem("strategy_flags", JSON.stringify(f));
+    }
+  } catch {}
+}
 
   async function saveFlags() {
     setSavedMsg("");
@@ -80,8 +88,14 @@ export default function AdminPage() {
       const data = await res.json();
       if (!res.ok || !data?.ok) throw new Error(data?.error || "Save failed");
 
-      setFlags(data.flags ?? flags);
-      setSavedMsg("Saved! Users will see changes immediately.");
+      const newFlags = data.flags ?? flags;
+
+setFlags(newFlags);
+
+// ✅ CRITICAL: sync to localStorage so users see it
+localStorage.setItem("strategy_flags", JSON.stringify(newFlags));
+
+setSavedMsg("Saved! Users will see changes immediately.");
       setTimeout(() => setSavedMsg(""), 2000);
 
     } catch (e: any) {
