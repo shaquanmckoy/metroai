@@ -1713,7 +1713,9 @@ function MetroXPanel({
 
         <p className="text-xs text-white/50 mt-3">
           Based on {ticks.length} ticks from <span className="font-semibold">{selectedPair}</span>• Last Digit:{" "}
-          <span className="text-green-400 font-semibold">{lastDigit !== null ? lastDigit : "-"}</span>
+         <span className="text-green-400 font-extrabold text-4xl leading-none drop-shadow-[0_0_12px_rgba(34,197,94,0.9)]">
+  {lastDigit !== null ? lastDigit : "-"}
+</span>
         </p>
 
         {/* Collapsible analysis box */}
