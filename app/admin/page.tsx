@@ -96,6 +96,8 @@ setFlags(newFlags);
 localStorage.setItem("strategy_flags", JSON.stringify(newFlags));
 
 setSavedMsg("Saved! Users will see changes immediately.");
+// 🔑 ALSO write to localStorage so users can read it
+localStorage.setItem("strategy_flags", JSON.stringify(data.flags));
       setTimeout(() => setSavedMsg(""), 2000);
 
     } catch (e: any) {

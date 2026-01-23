@@ -82,18 +82,29 @@ export default function Home() {
   };
 
   return (
-    <main className="min-h-screen flex items-center justify-center bg-gradient-to-br from-[#0b1220] to-black text-white p-6">
-      <form
-        onSubmit={handleLogin}
-        className="w-full max-w-sm bg-white/10 border border-white/10 rounded-2xl p-6 space-y-4"
-      >
-        <h1 className="text-xl font-bold text-center">Login to Deriv Analyzer</h1>
+  <main className="min-h-screen flex items-center justify-center bg-[radial-gradient(circle_at_top,#0b1a2a,#000000)] text-white p-6">
+    <div className="w-full max-w-sm bg-white/10 border border-white/10 rounded-2xl p-8 space-y-4 backdrop-blur-md shadow-2xl text-center">
 
-        {error && <p className="text-red-300 text-sm text-center">{error}</p>}
+      <img
+        src="/metroai-logo.png"
+        alt="MetroAi Logo"
+        className="mx-auto mb-4 w-36"
+      />
+
+      <h1 className="text-2xl font-bold">Welcome to MetroAi</h1>
+      <p className="text-sm opacity-70 mb-4">
+        Sign in to continue to Deriv Analyzer
+      </p>
+
+      <form onSubmit={handleLogin} className="space-y-4">
+
+        {error && (
+          <p className="text-red-300 text-sm text-center">{error}</p>
+        )}
 
         <input
           placeholder="Email"
-          className="w-full p-2 rounded bg-black/40 border border-white/10"
+          className="w-full p-3 rounded-lg bg-black/40 border border-white/10 focus:outline-none"
           value={email}
           onChange={(e) => setEmail(e.target.value)}
           autoComplete="email"
@@ -102,7 +113,7 @@ export default function Home() {
         <input
           type="password"
           placeholder="Password"
-          className="w-full p-2 rounded bg-black/40 border border-white/10"
+          className="w-full p-3 rounded-lg bg-black/40 border border-white/10 focus:outline-none"
           value={password}
           onChange={(e) => setPassword(e.target.value)}
           autoComplete="current-password"
@@ -110,11 +121,13 @@ export default function Home() {
 
         <button
           disabled={loading}
-          className="w-full bg-orange-500 hover:bg-orange-600 py-2 rounded font-semibold disabled:opacity-60"
+          className="w-full bg-orange-500 hover:bg-orange-600 py-3 rounded-lg font-semibold disabled:opacity-60 transition"
         >
           {loading ? "Logging in..." : "Log In"}
         </button>
+
       </form>
-    </main>
-  );
+    </div>
+  </main>
+);
 }
