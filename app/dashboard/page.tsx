@@ -250,8 +250,7 @@ useEffect(() => {
   const [mdTradeType, setMdTradeType] = useState<"Differs" | "Matches">("Differs");
   const [mdTickDuration, setMdTickDuration] = useState<number>(1);
 
-  const [tradeHistoryMatches, setTradeHistoryMatches] = useState<Trade[]>([]);
-  const [tradeHistoryOverUnder, setTradeHistoryOverUnder] = useState<Trade[]>([]);
+  const [tradeHistory, setTradeHistory] = useState<Trade[]>([]);
 
   const [instant3xRunning, setInstant3xRunning] = useState(false);
   const [turboMode, setTurboMode] = useState(false);
@@ -278,9 +277,9 @@ const spiderRandomLoopRef = useRef(false);
 const [pairMeta, setPairMeta] = useState(emptyMeta);
 
   // ✅ left-side Profit/Loss box (same metric as MetroX trade history)
-  const metroXNetProfit = useMemo(() => {
-    return tradeHistoryMatches.reduce((acc, t) => acc + Number(t.profit ?? 0), 0);
-  }, [tradeHistoryMatches]);
+  const sessionNetProfit = useMemo(() => {
+  return tradeHistory.reduce((acc, t) => acc + Number(t.profit ?? 0), 0);
+}, [tradeHistory]);
 
   // ✅ cleanup socket when leaving dashboard
   useEffect(() => {
@@ -348,8 +347,7 @@ const runBuyWorker = async () => {
         }
       : t
   );
-        setTradeHistoryMatches((prev) => fail(prev));
-        setTradeHistoryOverUnder((prev) => fail(prev));
+        setTradeHistory((prev) => fail(prev));
       }
 
       // Small gap between BUYs (Turbo-safe). If you still see issues, increase to 250.
@@ -581,8 +579,7 @@ pairDigitsRef.current[symbol] = next;
         contractToReqRef.current[contract_id] = req_id;
 
         const apply = (arr: Trade[]) => arr.map((t) => (t.id === req_id ? { ...t, contract_id } : t));
-        setTradeHistoryMatches((prev) => apply(prev));
-        setTradeHistoryOverUnder((prev) => apply(prev));
+        setTradeHistory((prev) => apply(prev));
 
         if (buyAckWaitersRef.current[req_id]) {
           buyAckWaitersRef.current[req_id].resolve();
@@ -619,8 +616,7 @@ pairDigitsRef.current[symbol] = next;
         const update = (arr: Trade[]) =>
           arr.map((t) => (t.id === req_id ? { ...t, result, profit, payout, settlementDigit } : t));
 
-        setTradeHistoryMatches((prev) => update(prev));
-        setTradeHistoryOverUnder((prev) => update(prev));
+        setTradeHistory((prev) => update(prev));
 
         // ✅ flash green 💰 on WIN digit OR red ❌ on LOSS digit
         if (typeof settlementDigit === "number") {
@@ -681,8 +677,7 @@ pairDigitsRef.current[symbol] = next;
   source: activeStrategy === "overunder" ? "SpiderX Auto" : "MetroX",
 };
 
-    if (type === "Matches" || type === "Differs") setTradeHistoryMatches((prev) => [trade, ...prev]);
-    else setTradeHistoryOverUnder((prev) => [trade, ...prev]);
+    setTradeHistory((prev) => [trade, ...prev]);
 
     reqInfoRef.current[req_id] = { symbol: selectedPair, digit: selectedDigit, type, stake };
 
@@ -720,7 +715,7 @@ const placeDiffersInstant = async (symbol: Pair, digit: number, count: number) =
       createdAt: Date.now(),
     };
 
-    setTradeHistoryMatches((prev) => [trade, ...prev]);
+    setTradeHistory((prev: Trade[]) => [trade, ...prev]);
 
     reqInfoRef.current[req_id] = {
   symbol,
@@ -764,7 +759,7 @@ const placeDiffersInstant = async (symbol: Pair, digit: number, count: number) =
       createdAt: Date.now(),
     };
 
-    setTradeHistoryMatches((prev) => [trade, ...prev]);
+    setTradeHistory((prev: Trade[]) => [trade, ...prev]);
     reqInfoRef.current[req_id] = { symbol, digit, type: "Differs", stake };
 
     const p = new Promise<void>((resolve, reject) => {
@@ -1292,10 +1287,10 @@ const toggleSpiderRandomAuto = async () => {
 
                 <div className="bg-black/30 rounded-xl p-4 border border-white/10">
                   <p className="text-gray-400">Session Profit/Loss</p>
-                  <p className={`font-semibold text-lg ${metroXNetProfit >= 0 ? "text-emerald-400" : "text-red-400"}`}>
-                    {metroXNetProfit >= 0 ? "+" : ""}
-                    {metroXNetProfit.toFixed(2)} {currency}
-                  </p>
+                  <p className={`font-semibold text-lg ${sessionNetProfit >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+  {sessionNetProfit >= 0 ? "+" : ""}
+  {sessionNetProfit.toFixed(2)} {currency}
+</p>
                 </div>
               </div>
             </div>
@@ -1369,8 +1364,8 @@ const toggleSpiderRandomAuto = async () => {
                 lastWinDigit={lastWinDigit}
                 lastLossDigit={lastLossDigit}
                 pairMeta={pairMeta}
-                tradeHistory={tradeHistoryMatches}
-                onClearHistory={() => setTradeHistoryMatches([])}
+                tradeHistory={tradeHistory}
+onClearHistory={() => setTradeHistory([])}
                 currency={currency}
                 run1xAutoAllPairs={run1xAutoAllPairs}
                 auto1xRunning={auto1xRunning}
@@ -1381,24 +1376,30 @@ const toggleSpiderRandomAuto = async () => {
 
             {activeStrategy === "overunder" && isStrategyEnabledForViewer("overunder") && (
   <div className="bg-[#13233d] p-6 flex flex-col min-h-[520px]">
-    <SpiderXAnalyzer
-      pairs={PAIRS}
-      indexGroups={INDEX_GROUPS}
-      pairDigitsRef={pairDigitsRef}
-      selectedPair={selectedPair}
-        setStake={setStake}   // ✅ ADD THIS
-      setSelectedPair={(p: Pair) => {
-        resetPairNow(p);
-        setSelectedPair(p);
-      }}
-      onPlaceTrade={(type: TradeType, duration: number) => placeTrade(type, duration)}
-      tradeHistory={tradeHistoryOverUnder}          // ✅ ADD
-      currency={currency}                          // ✅ ADD
-      onClearHistory={() => setTradeHistoryOverUnder([])} // ✅ ADD
-        toggleSpiderRandomAuto={toggleSpiderRandomAuto}
+   <SpiderXAnalyzer
+  pairs={PAIRS}
+  indexGroups={INDEX_GROUPS}
+  pairDigitsRef={pairDigitsRef}
+  selectedPair={selectedPair}
+  setStake={setStake}
+  stake={stake}
+  setSelectedPair={(p: Pair) => {
+    resetPairNow(p);
+    setSelectedPair(p);
+  }}
+  onPlaceTrade={(type: TradeType, duration: number) => placeTrade(type, duration)}
+  tradeHistory={tradeHistory}
+  currency={currency}
+  onClearHistory={() => setTradeHistory([])}
+  toggleSpiderRandomAuto={toggleSpiderRandomAuto}
   spiderRandomRunning={spiderRandomRunning}
-  setSelectedDigit={setSelectedDigit}  // ✅ ADD
-    />
+  setSelectedDigit={setSelectedDigit}
+
+  // ✅ ADD THESE:
+  selectedDigit={selectedDigit}
+  lastWinDigit={lastWinDigit}
+  lastLossDigit={lastLossDigit}
+/>
   </div>
 )}
 
@@ -1884,13 +1885,13 @@ function MetroXPanel({
       </div>
 
       {/* ACTION BUTTONS */}
-      <div className="mt-5 space-y-3">
+      <div className="mt-5 space-y-6">
         <button
           onClick={() => {
             if (selectedDigit === null) return alert("Select a digit first");
             onPlaceMetroX();
           }}
-          className="w-full rounded-md py-3 bg-emerald-600 hover:bg-emerald-700 text-sm font-semibold shadow-[0_0_0_1px_rgba(255,255,255,0.10)] active:scale-[0.98] active:brightness-110 transition"
+          className="w-full rounded-md py-4 bg-emerald-600 hover:bg-emerald-700 text-sm font-semibold shadow-[0_0_0_1px_rgba(255,255,255,0.10)] active:scale-[0.98] active:brightness-110 transition"
         >
           ⚡ Place MetroX Trade
         </button>
@@ -2256,11 +2257,13 @@ function SpiderXAnalyzer({
   currency,
   onClearHistory,
   setStake,
+  stake, // ✅ ADD THIS
   toggleSpiderRandomAuto,
   spiderRandomRunning,
-
-  // 🔽 ADD THIS
   setSelectedDigit,
+  selectedDigit,
+  lastWinDigit,
+  lastLossDigit,
 }: {
   pairs: readonly Pair[];
   indexGroups: typeof INDEX_GROUPS;
@@ -2272,16 +2275,28 @@ function SpiderXAnalyzer({
   currency: string;
   onClearHistory: () => void;
   setStake: (n: number) => void;
+  stake: number; // ✅ ADD THIS TYPE
   toggleSpiderRandomAuto: () => void;
   spiderRandomRunning: boolean;
-
-  // 🔽 ADD TYPE
   setSelectedDigit: (d: number | null) => void;
+  selectedDigit: number | null;
+  lastWinDigit: number | null;
+  lastLossDigit: number | null;
 }) {
     // ===== Live Digit Stream (SpiderX) =====
   const ticks = pairDigitsRef.current[selectedPair] ?? [];
 
   const lastDigit = ticks.length ? ticks[ticks.length - 1] : null;
+  // ✅ Use last20 like MetroX for a clean signal
+const last20 = ticks.slice(-20);
+
+const mostFrequentDigit = useMemo(() => {
+  if (last20.length < 1) return null;
+  const freq = Array.from({ length: 10 }, () => 0);
+  for (const d of last20) freq[d]++;
+  const max = Math.max(...freq);
+  return freq.indexOf(max); // first most frequent
+}, [last20]);
 
   const digitPercent = (d: number) => {
     if (!ticks.length) return 0;
@@ -2415,265 +2430,8 @@ const [popupDigit, setPopupDigit] = useState<number | null>(null);
 
   return (
     <div className="space-y-6">
-      {/* ================= Digit Trade Popup (SpiderX) ================= */}
-{digitPopupOpen && popupDigit !== null && (
-  <div className="fixed inset-0 z-50 flex items-center justify-center">
-    {/* Backdrop */}
-    <button
-      className="absolute inset-0 bg-black/60"
-      onClick={() => setDigitPopupOpen(false)}
-    />
 
-    {/* Modal */}
-    <div className="relative w-[340px] max-w-[92vw] rounded-2xl border border-white/10 bg-[#0f1b2d] p-5 shadow-2xl">
-      <div className="grid grid-cols-2 gap-4">
-        {/* Top buttons: 1 trade */}
-        <button
-          onClick={() => {
-  setSelectedDigit(popupDigit);   // ✅ ensure Dashboard has the digit
-  onPlaceTrade("Over", 1);
-  setDigitPopupOpen(false);
-}}
-          className="rounded-2xl bg-emerald-600 hover:bg-emerald-700 py-10 font-extrabold text-white text-xl"
-        >
-          OVER {popupDigit}
-        </button>
-
-        <button
-          onClick={() => {
-  setSelectedDigit(popupDigit);
-  onPlaceTrade("Under", 1);
-  setDigitPopupOpen(false);
-}}
-          className="rounded-2xl bg-blue-600 hover:bg-blue-700 py-10 font-extrabold text-white text-xl"
-        >
-          UNDER {popupDigit}
-        </button>
-      </div>
-
-      <div className="mt-4 text-center text-sm font-semibold text-white/60">
-        ADMIN: Instant Over/Under (3 Trades)
-      </div>
-
-      <div className="mt-4 grid grid-cols-2 gap-4">
-        {/* Bottom buttons: 3x trades */}
-        <button
-          onClick={() => {
-  setSelectedDigit(popupDigit);
-
-  onPlaceTrade("Over", 1);
-  setTimeout(() => onPlaceTrade("Over", 1), 400);
-  setTimeout(() => onPlaceTrade("Over", 1), 800);
-
-  setDigitPopupOpen(false);
-}}
-          className="rounded-2xl bg-orange-500 hover:bg-orange-600 py-8 font-bold text-white"
-        >
-          ⚡ Instant Over {popupDigit}
-          <div className="text-white/90 text-sm mt-2">(3x trades)</div>
-        </button>
-
-        <button
-          onClick={() => {
-  setSelectedDigit(popupDigit);
-
-  onPlaceTrade("Under", 1);
-  setTimeout(() => onPlaceTrade("Under", 1), 400);
-  setTimeout(() => onPlaceTrade("Under", 1), 800);
-
-  setDigitPopupOpen(false);
-}}
-          className="rounded-2xl bg-purple-600 hover:bg-purple-700 py-8 font-bold text-white"
-        >
-          ⚡ Instant Under {popupDigit}
-          <div className="text-white/90 text-sm mt-2">(3x trades)</div>
-        </button>
-      </div>
-
-      <button
-        onClick={() => setDigitPopupOpen(false)}
-        className="mt-5 w-full rounded-xl bg-white/10 hover:bg-white/15 border border-white/10 py-3 font-semibold text-white/80"
-      >
-        Cancel
-      </button>
-    </div>
-  </div>
-)}
-      {/* ================= Live Digit Stream (SpiderX) ================= */}
-<div className="rounded-2xl border border-white/10 bg-gradient-to-br from-[#1b2235]/95 to-[#121826]/95 p-4">
-  <p className="text-sm text-white/80 mb-3">Live Digit Stream</p>
-
-  <div className="grid grid-cols-5 gap-3 mb-3">
-  {Array.from({ length: 10 }, (_, d) => {
-    const pct = digitPercent(d);
-    const live = lastDigit === d;
-
-    const base = "bg-[#0e1422] border-white/10 text-white/90";
-    const liveCls = "bg-emerald-600/30 border-emerald-400 text-white";
-
-    const cls = live ? liveCls : base;
-
-    return (
-      <button
-        key={d}
-        onClick={() => {
-  setSelectedDigit(d);     // ✅ update Dashboard state
-  setPopupDigit(d);
-  setDigitPopupOpen(true);
-}}
-        className={`rounded-full py-3 text-center border transition ${cls}`}
-      >
-        <div className="text-lg font-bold leading-none">{d}</div>
-        <div className="mt-1 text-[11px] text-white/60">
-          {pct.toFixed(1)}%
-        </div>
-      </button>
-    );
-  })}
-</div>
-
-  <p className="text-xs text-white/60 text-center">
-    Based on {ticks.length} ticks from{" "}
-    <span className="font-semibold">{selectedPair}</span> • Last Digit:{" "}
-    <span className="text-emerald-400 font-extrabold text-xl">
-      {lastDigit !== null ? lastDigit : "-"}
-    </span>
-  </p>
-</div>
-      {/* ================= SpiderX Settings ================= */}
-      <div className="rounded-xl border border-white/10 bg-white/5 p-4">
-        <p className="text-sm font-semibold text-white/90 mb-3">🕷 SpiderX Settings</p>
-
-        {/* TOP ROW */}
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-4">
-          {/* Select Index */}
-          <div>
-            <p className="text-[11px] text-white/60 mb-1">Select Index</p>
-            <select
-              className="w-full bg-[#0e1422] border border-white/10 p-2 rounded-md text-sm"
-              value={selectedPair}
-              onChange={(e) => setSelectedPair(e.target.value as Pair)}
-            >
-              <optgroup label="Volatility Indices">
-                {indexGroups.volatility.map((s) => (
-                  <option key={s.code} value={s.code}>
-                    {s.label}
-                  </option>
-                ))}
-              </optgroup>
-              <optgroup label="Jump Indices">
-                {indexGroups.jump.map((s) => (
-                  <option key={s.code} value={s.code}>
-                    {s.label}
-                  </option>
-                ))}
-              </optgroup>
-            </select>
-          </div>
-
-          {/* Barrier */}
-          <div>
-            <p className="text-[11px] text-white/60 mb-1">Barrier Number</p>
-            <select
-              className="w-full bg-[#0e1422] border border-white/10 p-2 rounded-md text-sm"
-              value={barrierDigit}
-              onChange={(e) => setBarrierDigit(Number(e.target.value))}
-            >
-              {Array.from({ length: 10 }, (_, d) => (
-                <option key={d} value={d}>
-                  {d}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          {/* Tick Duration */}
-          <div>
-            <p className="text-[11px] text-white/60 mb-1">Tick Duration</p>
-            <select className="w-full bg-[#0e1422] border border-white/10 p-2 rounded-md text-sm" value={1} disabled>
-              <option value={1}>1 Tick</option>
-            </select>
-          </div>
-        </div>
-
-        {/* Stake */}
-        <div className="mb-4">
-          <p className="text-[11px] text-white/60 mb-2">Take Amount</p>
-          <div className="grid grid-cols-4 gap-2">
-            {[1, 2, 5, 10].map((amt) => (
-              <button
-                key={amt}
-                onClick={() => setStake(amt)}
-                className="rounded-md py-2 text-sm border bg-[#0e1422] border-white/10 hover:bg-white/5"
-              >
-                ${amt}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        {/* Manual Over/Under */}
-        <p className="text-sm font-semibold text-white/80 mb-2">Manual Over / Under Trading</p>
-        <div className="grid grid-cols-2 gap-3">
-          <button
-            onClick={() => {
-              const now = Date.now();
-              if (now - lastManualRef.current < 400) return;
-              lastManualRef.current = now;
-
-              setManualActive("Over");
-
-              // ✅ IMPORTANT: Dashboard trades use selectedDigit.
-              // To truly use barrierDigit, you must also set selectedDigit in Dashboard.
-              // Quick workaround: setSelectedPair only; (better fix below)
-              onPlaceTrade("Over", 1);
-
-              setTimeout(() => setManualActive(null), 300);
-            }}
-            className={`rounded-md py-3 font-semibold transition ${
-              manualActive === "Over"
-                ? "bg-emerald-500 shadow-[0_0_20px_rgba(16,185,129,0.9)]"
-                : "bg-emerald-600 hover:bg-emerald-700"
-            }`}
-          >
-            Over {barrierDigit}
-          </button>
-
-          <button
-            onClick={() => {
-              const now = Date.now();
-              if (now - lastManualRef.current < 400) return;
-              lastManualRef.current = now;
-
-              setManualActive("Under");
-              onPlaceTrade("Under", 1);
-              setTimeout(() => setManualActive(null), 300);
-            }}
-            className={`rounded-md py-3 font-semibold transition ${
-              manualActive === "Under"
-                ? "bg-red-500 shadow-[0_0_20px_rgba(239,68,68,0.9)]"
-                : "bg-red-600 hover:bg-red-700"
-            }`}
-          >
-            Under {barrierDigit}
-          </button>
-        </div>
-
-        {/* Random Auto button */}
-        <div className="mt-4">
-          <button
-            onClick={toggleSpiderRandomAuto}
-            className={`w-full py-3 rounded-md font-semibold text-sm transition ${
-              spiderRandomRunning ? "bg-red-600 hover:bg-red-700 animate-pulse" : "bg-indigo-600 hover:bg-indigo-700"
-            }`}
-          >
-            {spiderRandomRunning ? "Stop Random Over/Under" : "🎲 Enable Random Over/Under"}
-          </button>
-          <p className="mt-2 text-xs text-white/60 text-center">Takes fast random Over/Under trades (0.4s, 1 tick)</p>
-        </div>
-      </div>
-
-      {/* ================= Analyzer ================= */}
+        {/* ================= Analyzer ================= */}
       <div className="rounded-2xl border border-white/10 bg-gradient-to-br from-[#1b2235]/95 to-[#121826]/95 p-5">
         {/* Header */}
         <div className="flex items-center justify-between mb-3">
@@ -2807,11 +2565,326 @@ const [popupDigit, setPopupDigit] = useState<number | null>(null);
           </div>
         )}
 
-        {/* Trade History */}
-        <div className="mt-6">
-          <TradeHistoryMetroLike tradeHistory={tradeHistory} currency={currency} onClear={onClearHistory} />
+              </div>
+      {/* ================= Digit Trade Popup (SpiderX) ================= */}
+{digitPopupOpen && popupDigit !== null && (
+  <div className="fixed inset-0 z-50 flex items-center justify-center">
+    {/* Backdrop */}
+    <button
+      className="absolute inset-0 bg-black/60"
+      onClick={() => setDigitPopupOpen(false)}
+    />
+
+    {/* Modal */}
+    <div className="relative w-[340px] max-w-[92vw] rounded-2xl border border-white/10 bg-[#0f1b2d] p-5 shadow-2xl">
+      <div className="grid grid-cols-2 gap-4">
+        {/* Top buttons: 1 trade */}
+        <button
+          onClick={() => {
+  setSelectedDigit(popupDigit);   // ✅ ensure Dashboard has the digit
+  onPlaceTrade("Over", 1);
+  setDigitPopupOpen(false);
+}}
+          className="rounded-2xl bg-emerald-600 hover:bg-emerald-700 py-10 font-extrabold text-white text-xl"
+        >
+          OVER {popupDigit}
+        </button>
+
+        <button
+          onClick={() => {
+  setSelectedDigit(popupDigit);
+  onPlaceTrade("Under", 1);
+  setDigitPopupOpen(false);
+}}
+          className="rounded-2xl bg-blue-600 hover:bg-blue-700 py-10 font-extrabold text-white text-xl"
+        >
+          UNDER {popupDigit}
+        </button>
+      </div>
+
+      <div className="mt-4 text-center text-sm font-semibold text-white/60">
+        ADMIN: Instant Over/Under (3 Trades)
+      </div>
+
+      <div className="mt-4 grid grid-cols-2 gap-4">
+        {/* Bottom buttons: 3x trades */}
+        <button
+          onClick={() => {
+  setSelectedDigit(popupDigit);
+
+  onPlaceTrade("Over", 1);
+  setTimeout(() => onPlaceTrade("Over", 1), 400);
+  setTimeout(() => onPlaceTrade("Over", 1), 800);
+
+  setDigitPopupOpen(false);
+}}
+          className="rounded-2xl bg-orange-500 hover:bg-orange-600 py-8 font-bold text-white"
+        >
+          ⚡ Instant Over {popupDigit}
+          <div className="text-white/90 text-sm mt-2">(3x trades)</div>
+        </button>
+
+        <button
+          onClick={() => {
+  setSelectedDigit(popupDigit);
+
+  onPlaceTrade("Under", 1);
+  setTimeout(() => onPlaceTrade("Under", 1), 400);
+  setTimeout(() => onPlaceTrade("Under", 1), 800);
+
+  setDigitPopupOpen(false);
+}}
+          className="rounded-2xl bg-purple-600 hover:bg-purple-700 py-8 font-bold text-white"
+        >
+          ⚡ Instant Under {popupDigit}
+          <div className="text-white/90 text-sm mt-2">(3x trades)</div>
+        </button>
+      </div>
+
+      <button
+        onClick={() => setDigitPopupOpen(false)}
+        className="mt-5 w-full rounded-xl bg-white/10 hover:bg-white/15 border border-white/10 py-3 font-semibold text-white/80"
+      >
+        Cancel
+      </button>
+    </div>
+  </div>
+)}
+      {/* ================= Live Digit Stream (SpiderX) ================= */}
+<div className="rounded-2xl border border-white/10 bg-gradient-to-br from-[#1b2235]/95 to-[#121826]/95 p-4">
+  <p className="text-sm text-white/80 mb-3">Live Digit Stream</p>
+
+  <div className="grid grid-cols-5 gap-3 mb-3">
+  {Array.from({ length: 10 }, (_, d) => {
+  const pct = digitPercent(d);
+
+  const selected = selectedDigit === d;     // ✅ manual selected
+  const won = lastWinDigit === d;           // ✅ win flash
+  const lost = lastLossDigit === d;         // ✅ loss flash
+  const live = lastDigit === d;             // ✅ market last digit
+  const most = mostFrequentDigit === d;     // ✅ most frequent in red
+
+  // same style set as MetroX
+  const base = "bg-[#0e1422] border-white/10 text-white/90 hover:bg-white/5";
+  const selectedCls = "bg-blue-600/90 border-blue-400 text-white";
+  const wonCls = "bg-emerald-600/35 border-emerald-400 text-white";
+  const lostCls = "bg-red-600/35 border-red-400 text-white";
+  const liveCls = "bg-emerald-600/20 border-emerald-500/30 text-white";
+  const mostCls = "bg-red-600/20 border-red-500/35 text-white";
+
+  // ✅ Priority (same idea as MetroX)
+  const cls = selected
+    ? selectedCls
+    : won
+    ? wonCls
+    : lost
+    ? lostCls
+    : live
+    ? liveCls
+    : most
+    ? mostCls
+    : base;
+
+  return (
+    <button
+      key={d}
+      onClick={() => {
+        setSelectedDigit(d);
+        setPopupDigit(d);
+        setDigitPopupOpen(true);
+      }}
+      className={`relative rounded-full py-3 text-center border transition ${cls}`}
+    >
+      {/* ✅ Icons like MetroX */}
+      {selected && <span className="absolute top-2 right-3 text-white text-sm">✓</span>}
+      {!selected && won && <span className="absolute top-2 right-3 text-emerald-100 text-sm">💰</span>}
+      {!selected && !won && lost && <span className="absolute top-2 right-3 text-red-100 text-sm">❌</span>}
+      {!selected && !won && !lost && live && <span className="absolute top-2 right-3 text-emerald-200 text-sm">●</span>}
+      {!selected && !won && !lost && !live && most && <span className="absolute top-2 right-3 text-red-200 text-sm">▲</span>}
+
+      <div className="text-lg font-bold leading-none">{d}</div>
+      <div className="mt-1 text-[11px] text-white/60">{pct.toFixed(1)}%</div>
+    </button>
+  );
+})}
+</div>
+
+  <p className="text-xs text-white/60 text-center">
+    Based on {ticks.length} ticks from{" "}
+    <span className="font-semibold">{selectedPair}</span> • Last Digit:{" "}
+    <span className="text-emerald-400 font-extrabold text-xl">
+      {lastDigit !== null ? lastDigit : "-"}
+    </span>
+  </p>
+</div>
+      {/* ================= SpiderX Settings ================= */}
+      <div className="rounded-xl border border-white/10 bg-white/5 p-4">
+        <p className="text-sm font-semibold text-white/90 mb-3">🕷 SpiderX Settings</p>
+
+        {/* TOP ROW */}
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-4">
+          {/* Select Index */}
+          <div>
+            <p className="text-[11px] text-white/60 mb-1">Select Index</p>
+            <select
+              className="w-full bg-[#0e1422] border border-white/10 p-2 rounded-md text-sm"
+              value={selectedPair}
+              onChange={(e) => setSelectedPair(e.target.value as Pair)}
+            >
+              <optgroup label="Volatility Indices">
+                {indexGroups.volatility.map((s) => (
+                  <option key={s.code} value={s.code}>
+                    {s.label}
+                  </option>
+                ))}
+              </optgroup>
+              <optgroup label="Jump Indices">
+                {indexGroups.jump.map((s) => (
+                  <option key={s.code} value={s.code}>
+                    {s.label}
+                  </option>
+                ))}
+              </optgroup>
+            </select>
+          </div>
+
+          {/* Barrier */}
+          <div>
+            <p className="text-[11px] text-white/60 mb-1">Barrier Number</p>
+            <select
+              className="w-full bg-[#0e1422] border border-white/10 p-2 rounded-md text-sm"
+              value={barrierDigit}
+              onChange={(e) => {
+  const d = Number(e.target.value);
+  setBarrierDigit(d);
+  setSelectedDigit(d); // ✅ sync barrier -> Dashboard selectedDigit
+}}
+            >
+              {Array.from({ length: 10 }, (_, d) => (
+                <option key={d} value={d}>
+                  {d}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {/* Tick Duration */}
+          <div>
+            <p className="text-[11px] text-white/60 mb-1">Tick Duration</p>
+            <select className="w-full bg-[#0e1422] border border-white/10 p-2 rounded-md text-sm" value={1} disabled>
+              <option value={1}>1 Tick</option>
+            </select>
+          </div>
+        </div>
+
+        {/* Stake */}
+        <div className="mb-4">
+  <p className="text-[11px] text-white/60 mb-2">Stake Amount</p>
+
+  <div className="flex gap-2">
+    <input
+      type="number"
+      step="0.1"
+      min="0.1"
+      value={stake}
+      onChange={(e) => setStake(Number(e.target.value))}
+      className="w-full bg-[#0e1422] border border-white/10 p-2 rounded-md text-sm"
+    />
+
+    <button
+      onClick={() => setStake(1)}
+      className="px-3 rounded-md bg-white/5 border border-white/10 text-sm hover:bg-white/10"
+    >
+      $1
+    </button>
+
+    <button
+      onClick={() => setStake(5)}
+      className="px-3 rounded-md bg-white/5 border border-white/10 text-sm hover:bg-white/10"
+    >
+      $5
+    </button>
+
+    <button
+      onClick={() => setStake(10)}
+      className="px-3 rounded-md bg-white/5 border border-white/10 text-sm hover:bg-white/10"
+    >
+      $10
+    </button>
+  </div>
+        </div>
+
+        {/* Manual Over/Under */}
+        <p className="text-sm font-semibold text-white/80 mb-2">Manual Over / Under Trading</p>
+        <div className="grid grid-cols-2 gap-3">
+          <button
+            onClick={() => {
+  const now = Date.now();
+  if (now - lastManualRef.current < 400) return;
+  lastManualRef.current = now;
+
+  setManualActive("Over");
+
+  setSelectedDigit(barrierDigit); // ✅ CRITICAL
+  onPlaceTrade("Over", 1);
+
+  setTimeout(() => setManualActive(null), 300);
+}}
+            className={`rounded-md py-3 font-semibold transition ${
+              manualActive === "Over"
+                ? "bg-emerald-500 shadow-[0_0_20px_rgba(16,185,129,0.9)]"
+                : "bg-emerald-600 hover:bg-emerald-700"
+            }`}
+          >
+            Over {barrierDigit}
+          </button>
+
+          <button
+           onClick={() => {
+  const now = Date.now();
+  if (now - lastManualRef.current < 400) return;
+  lastManualRef.current = now;
+
+  setManualActive("Under");
+
+  setSelectedDigit(barrierDigit); // ✅ CRITICAL
+  onPlaceTrade("Under", 1);
+
+  setTimeout(() => setManualActive(null), 300);
+}}
+            className={`rounded-md py-3 font-semibold transition ${
+              manualActive === "Under"
+                ? "bg-red-500 shadow-[0_0_20px_rgba(239,68,68,0.9)]"
+                : "bg-red-600 hover:bg-red-700"
+            }`}
+          >
+            Under {barrierDigit}
+          </button>
+        </div>
+
+        {/* Random Auto button */}
+        <div className="mt-4">
+          <button
+            onClick={toggleSpiderRandomAuto}
+            className={`w-full py-3 rounded-md font-semibold text-sm transition ${
+              spiderRandomRunning ? "bg-red-600 hover:bg-red-700 animate-pulse" : "bg-indigo-600 hover:bg-indigo-700"
+            }`}
+          >
+            {spiderRandomRunning ? "Stop Random Over/Under" : "🎲 Enable Random Over/Under"}
+          </button>
+          <p className="mt-2 text-xs text-white/60 text-center">Takes fast random Over/Under trades (0.4s, 1 tick)</p>
         </div>
       </div>
+      {/* ================= Trade History (Separate Panel) ================= */}
+<div className="mt-6">
+  <TradeHistoryMetroLike
+    tradeHistory={tradeHistory}
+    currency={currency}
+    onClear={onClearHistory}
+  />
+</div>
+
+
     </div>
   );
 }
