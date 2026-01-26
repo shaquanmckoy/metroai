@@ -83,7 +83,7 @@ export default function Home() {
 
   return (
   <main className="min-h-screen flex items-center justify-center bg-[radial-gradient(circle_at_top,#0b1a2a,#000000)] text-white p-6">
-    <div className="w-full max-w-sm bg-white/10 border border-white/10 rounded-2xl p-8 space-y-4 backdrop-blur-md shadow-2xl text-center">
+    <div className="glass-panel w-full max-w-sm p-8 space-y-4 text-center">
 
       <img
         src="/metroai-logo.png"
@@ -120,9 +120,15 @@ export default function Home() {
         />
 
         <button
-          disabled={loading}
-          className="w-full bg-orange-500 hover:bg-orange-600 py-3 rounded-lg font-semibold disabled:opacity-60 transition"
-        >
+  disabled={loading}
+  className="w-full py-3 rounded-lg font-semibold transition
+    bg-gradient-to-r from-orange-500 to-orange-600
+    hover:from-orange-400 hover:to-orange-500
+    active:scale-[0.98]
+    border border-white/10
+    shadow-[0_6px_20px_rgba(249,115,22,0.35)]
+    disabled:opacity-60"
+>
           {loading ? "Logging in..." : "Log In"}
         </button>
 

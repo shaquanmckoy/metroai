@@ -14,3 +14,30 @@ body {
   background: var(--background);
   color: var(--foreground);
 }
+
+/* ===== MetroAI Glass Panels (Direction A) ===== */
+.glass-panel {
+  background: linear-gradient(
+    180deg,
+    rgba(20, 30, 55, 0.75),
+    rgba(10, 18, 35, 0.75)
+  );
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  border-radius: 1rem;
+
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.04),
+    0 12px 30px rgba(0, 0, 0, 0.45);
+
+  transition: transform 0.25s ease, box-shadow 0.25s ease;
+}
+
+.glass-panel:hover {
+  transform: translateY(-3px);
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.06),
+    0 20px 45px rgba(0, 0, 0, 0.55);
+}

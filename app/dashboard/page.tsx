@@ -1199,13 +1199,26 @@ const toggleSpiderRandomAuto = async () => {
       <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(55%_55%_at_80%_20%,rgba(59,130,246,0.16),transparent_60%)]" />
       <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(60%_60%_at_50%_85%,rgba(16,185,129,0.10),transparent_60%)]" />
 
+      {/* MetroAI watermark background */}
+<div
+  className="pointer-events-none absolute inset-0 flex items-center justify-center opacity-[0.15]"
+  style={{
+    backgroundImage: "url('/metroai-logo.png')",
+    backgroundRepeat: "no-repeat",
+    backgroundPosition: "center",
+    backgroundSize: "60%",
+  }}
+/>
+
       <div className="relative">
         {/* NAVBAR */}
         <header className="h-16 bg-[#0f1b2d]/70 backdrop-blur-md flex items-center justify-between px-6 border-b border-white/10">
           <div className="flex items-center gap-3">
-            <div className="w-9 h-9 rounded-md bg-orange-500 flex items-center justify-center font-bold shadow-[0_0_0_1px_rgba(255,255,255,0.12)]">
-              M
-            </div>
+            <img
+  src="/metroai-logo.png"
+  alt="MetroAI Logo"
+  className="w-10 h-9 rounded-md object-contain bg-white/5 p-1 border border-white/10"
+/>
             <div>
               <p className="font-bold leading-tight">MetroAi</p>
               <p className="text-xs text-gray-400">AI Trading</p>
@@ -1233,9 +1246,10 @@ const toggleSpiderRandomAuto = async () => {
 
         {/* PAGE HEADER */}
         <section className="px-8 py-6">
-          <div className="bg-gradient-to-r from-orange-600/80 to-orange-900/80 rounded-2xl p-6 flex justify-between items-center border border-white/10 shadow-[0_0_0_1px_rgba(255,255,255,0.06)]">
+          <div className="glass-panel p-6 flex justify-between items-center
+  bg-gradient-to-r from-orange-500/30 via-orange-600/20 to-purple-700/20">
             <div>
-              <h1 className="text-2xl font-bold">Trading Analyzer</h1>
+              <h1 className="text-2xl font-extrabold tracking-tight">Trading Analyzer</h1>
               <p className="text-sm text-orange-100">Connect to Deriv and manage your trading activities</p>
             </div>
 
@@ -1270,23 +1284,23 @@ const toggleSpiderRandomAuto = async () => {
           {/* LEFT */}
           <div className="space-y-6">
             <div className="bg-[#13233d]/80 backdrop-blur rounded-2xl p-6 border border-white/10 shadow-[0_0_0_1px_rgba(255,255,255,0.06)]">
-              <h2 className="font-semibold mb-4 text-white/90">Deriv API Connection</h2>
+              <h2 className="font-semibold mb-4 text-white/85 tracking-tight">Deriv API Connection</h2>
 
               <div className="grid grid-cols-2 lg:grid-cols-3 gap-4 text-sm">
                 <div className="bg-black/30 rounded-xl p-4 border border-white/10">
-                  <p className="text-gray-400">Account Status</p>
+                  <p className="text-white/55 text-xs uppercase tracking-wide">Account Status</p>
                   <p className="font-semibold text-green-400">{connected ? "Connected" : "Disconnected"}</p>
                 </div>
 
                 <div className="bg-black/30 rounded-xl p-4 border border-white/10">
-                  <p className="text-gray-400">Account Balance</p>
+                  <p className="text-white/55 text-xs uppercase tracking-wide">Account Balance</p>
                   <p className="font-semibold text-lg">
                     {balance !== null ? `${balance.toFixed(2)} ${currency}` : "Loading..."}
                   </p>
                 </div>
 
                 <div className="bg-black/30 rounded-xl p-4 border border-white/10">
-                  <p className="text-gray-400">Session Profit/Loss</p>
+                  <p className="text-white/55 text-xs uppercase tracking-wide">Session Profit/Loss</p>
                   <p className={`font-semibold text-lg ${sessionNetProfit >= 0 ? "text-emerald-400" : "text-red-400"}`}>
   {sessionNetProfit >= 0 ? "+" : ""}
   {sessionNetProfit.toFixed(2)} {currency}
@@ -1296,7 +1310,7 @@ const toggleSpiderRandomAuto = async () => {
             </div>
 
             <div className="bg-[#13233d]/80 backdrop-blur rounded-2xl p-6 border border-white/10 shadow-[0_0_0_1px_rgba(255,255,255,0.06)]">
-              <h2 className="font-semibold mb-4 text-white/90">Trading Strategies</h2>
+              <h2 className="font-semibold mb-4 text-white/85 tracking-tight">Trading Strategies</h2>
 
               {/* ✅ show/hide based on admin flags (NEW) */}
               {isStrategyEnabledForViewer("matches") ? (
@@ -1441,7 +1455,7 @@ function StrategyRow({
   return (
     <div className="flex items-center justify-between mb-4">
       <div>
-        <p className="font-medium text-white/90">{title}</p>
+        <p className="font-semibold text-white/90 tracking-tight">{title}</p>
         <p className="text-xs text-gray-400">{description}</p>
       </div>
 

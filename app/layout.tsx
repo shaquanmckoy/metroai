@@ -15,14 +15,20 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: "MetroAi",
   description: "AI Trading",
+  icons: {
+    icon: "/metroai-logo.png",
+  },
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en" className="h-full">
-      <body className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}>
-        {children}
-      </body>
-    </html>
+  <head>
+    <link rel="icon" href="/metroai-logo.png" />
+  </head>
+  <body className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}>
+    {children}
+  </body>
+</html>
   );
 }
