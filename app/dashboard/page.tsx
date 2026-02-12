@@ -14,6 +14,15 @@ export const INDEX_GROUPS = {
     { code: "R_50", label: "Volatility 50 Index" },
     { code: "R_75", label: "Volatility 75 Index" },
     { code: "R_100", label: "Volatility 100 Index" },
+    { code: "1HZ10V", label: "Volatility 10 (1s) Index" },
+    {code: "1HZ15V", label: "Volatility 15 (1s) Index" },
+    { code: "1HZ25V", label: "Volatility 25 (1s) Index" },
+    { code: "1HZ50V", label: "Volatility 50 (1s) Index" },
+    { code: "1HZ75V", label: "Volatility 75 (1s) Index" },
+    {code: "1HZ90V", label: "Volatility 90 (1s) Index" },
+    { code: "1HZ100V", label: "Volatility 100 (1s) Index" },
+    
+    
   ],
 
   jump: [
@@ -22,15 +31,25 @@ export const INDEX_GROUPS = {
     { code: "JD50", label: "Jump 50 Index" },
     { code: "JD75", label: "Jump 75 Index" },
     { code: "JD100", label: "Jump 100 Index" },
+    { code: "RDBEAR", label: "Bear Market Index" },
+    { code: "RDBULL", label: "Bull Market Index" },
   ],
 };
 
 export const PAIRS = [
+  // 🚀 Volatility
   "R_10",
   "R_25",
   "R_50",
   "R_75",
   "R_100",
+  "1HZ10V",
+  "1HZ15V",
+  "1HZ25V",
+  "1HZ50V",
+  "1HZ75V",
+  "1HZ90V",
+  "1HZ100V",
 
   // 🚀 Jump
   "JD10",
@@ -38,6 +57,8 @@ export const PAIRS = [
   "JD50",
   "JD75",
   "JD100",
+  "RDBEAR",
+  "RDBULL",
 ] as const;
 
 export type Pair = (typeof PAIRS)[number];
@@ -2011,25 +2032,54 @@ const canShow = (key: keyof UIFlags) => isAdmin || uiFlags[key] !== false;
       <button
         disabled={edshellPlacing}
         onClick={async () => {
-          if (edshellPlacing) return;
+  if (edshellPlacing) return;
 
-          setEdshellPlacing(true);
+  setEdshellPlacing(true);
 
-          await placeTradeFor({
-            symbol: selectedPair,
-            digit: pairMeta[selectedPair]?.lowDigit ?? 0,
-            type: "Differs",
-            durationTicks: mdTickDuration,
-            count: edshellCount,
-          });
+  try {
+    // default = current index
+    let pickPair: Pair = selectedPair;
 
-          setEdshellPlacing(false);
-          setEdshellPlaced(true);
+    // if "Scan All" is selected, choose best pair
+    if (edshellScope === "scan") {
+      let bestPair: Pair | null = null;
+      let bestPct = Infinity;
 
-          setTimeout(() => {
-            setEdshellPlaced(false);
-          }, 1500);
-        }}
+      for (const p of PAIRS) {
+        const m = pairMeta[p];
+        if (!m || m.count < 20) continue;
+        if (typeof m.lowPct !== "number") continue;
+
+        if (m.lowPct < bestPct) {
+          bestPct = m.lowPct;
+          bestPair = p;
+        }
+      }
+
+      if (!bestPair) {
+        alert("Scan All needs at least 20 cached ticks on some pairs.");
+        return;
+      }
+
+      pickPair = bestPair;
+    }
+
+    const digit = pairMeta[pickPair]?.lowDigit ?? 0;
+
+    await placeTradeFor({
+      symbol: pickPair,
+      digit,
+      type: "Differs",
+      durationTicks: mdTickDuration,
+      count: edshellCount,
+    });
+
+    setEdshellPlaced(true);
+    setTimeout(() => setEdshellPlaced(false), 1500);
+  } finally {
+    setEdshellPlacing(false);
+  }
+}}
         className={`w-full rounded-md py-4 text-lg font-bold transition ${
           edshellPlacing
             ? "bg-red-600 animate-pulse"
