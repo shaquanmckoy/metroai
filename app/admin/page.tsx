@@ -1,10 +1,11 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 
 type Flags = { matches: boolean; overunder: boolean };
 const DEFAULT_FLAGS: Flags = { matches: true, overunder: true };
+
 type UIFlags = {
   metro_place_trade: boolean;
   metro_edshell: boolean;
@@ -34,12 +35,31 @@ type DbUser = {
   email: string;
   role: "admin" | "user";
   created_at?: string;
+
+  // login stats
+  login_count?: number | string | null;
+  last_login_at?: string | null;
+  last_login_device?: string | null;
 };
+
+function fmtDate(s?: string | null) {
+  if (!s) return "—";
+  const d = new Date(s);
+  if (Number.isNaN(d.getTime())) return "—";
+  return d.toLocaleString();
+}
+
+function toLoginCount(v: DbUser["login_count"]) {
+  if (v === null || v === undefined) return 0;
+  const n = typeof v === "string" ? Number(v) : v;
+  return Number.isFinite(n) ? n : 0;
+}
 
 export default function AdminPage() {
   const router = useRouter();
+
   const [uiFlags, setUiFlags] = useState<UIFlags>(DEFAULT_UI_FLAGS);
-const [uiSavedMsg, setUiSavedMsg] = useState("");
+  const [uiSavedMsg, setUiSavedMsg] = useState("");
 
   const [ready, setReady] = useState(false);
   const [email, setEmail] = useState("admin");
@@ -70,9 +90,9 @@ const [uiSavedMsg, setUiSavedMsg] = useState("");
     setEmail(localStorage.getItem("email") || "admin");
 
     setReady(true);
-void loadFlags();
-void loadUIFlags();
-void loadUsers();
+    void loadFlags();
+    void loadUIFlags();
+    void loadUsers();
   }, [router]);
 
   const logout = () => {
@@ -81,87 +101,80 @@ void loadUsers();
   };
 
   /* ===================== LOAD / SAVE STRATEGIES ===================== */
+  async function loadFlags() {
+    try {
+      const res = await fetch("/api/admin/strategies", { cache: "no-store" });
+      const data = await res.json();
+      if (data?.ok) {
+        const f = data.flags ?? DEFAULT_FLAGS;
+        setFlags(f);
+        localStorage.setItem("strategy_flags", JSON.stringify(f));
+      }
+    } catch {}
+  }
 
-async function loadFlags() {
-  try {
-    const res = await fetch("/api/admin/strategies", { cache: "no-store" });
-    const data = await res.json();
+  async function saveFlags() {
+    setSavedMsg("");
 
-    if (data?.ok) {
-      const f = data.flags ?? DEFAULT_FLAGS;
-      setFlags(f);
-      localStorage.setItem("strategy_flags", JSON.stringify(f));
+    try {
+      const res = await fetch("/api/admin/strategies", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          matches: flags.matches,
+          overunder: flags.overunder,
+        }),
+      });
+
+      const data = await res.json();
+      if (!res.ok || !data?.ok) throw new Error(data?.error || "Save failed");
+
+      const newFlags = data.flags ?? flags;
+      setFlags(newFlags);
+      localStorage.setItem("strategy_flags", JSON.stringify(newFlags));
+
+      setSavedMsg("Saved! Users will see changes immediately.");
+      setTimeout(() => setSavedMsg(""), 2000);
+    } catch (e: any) {
+      setSavedMsg(e?.message || "Failed to save.");
+      setTimeout(() => setSavedMsg(""), 2500);
     }
-  } catch {}
-}
-
-async function saveFlags() {
-  setSavedMsg("");
-
-  try {
-    const res = await fetch("/api/admin/strategies", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        matches: flags.matches,
-        overunder: flags.overunder,
-      }),
-    });
-
-    const data = await res.json();
-    if (!res.ok || !data?.ok) throw new Error(data?.error || "Save failed");
-
-    const newFlags = data.flags ?? flags;
-    setFlags(newFlags);
-
-    localStorage.setItem("strategy_flags", JSON.stringify(newFlags));
-
-    setSavedMsg("Saved! Users will see changes immediately.");
-    setTimeout(() => setSavedMsg(""), 2000);
-  } catch (e: any) {
-    setSavedMsg(e?.message || "Failed to save.");
-    setTimeout(() => setSavedMsg(""), 2500);
   }
-}
 
-/* ===================== LOAD / SAVE UI FLAGS ===================== */
-
-async function loadUIFlags() {
-  try {
-    const res = await fetch("/api/admin/ui-flags", { cache: "no-store" });
-    const data = await res.json();
-    if (data?.ok) setUiFlags(data.flags ?? DEFAULT_UI_FLAGS);
-  } catch {}
-}
-
-async function saveUIFlags() {
-  setUiSavedMsg("");
-
-  try {
-    const res = await fetch("/api/admin/ui-flags", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(uiFlags),
-    });
-
-    const data = await res.json();
-    if (!res.ok || !data?.ok) throw new Error(data?.error || "Save failed");
-
-    setUiFlags(data.flags ?? uiFlags);
-
-    // optional (only helps if you also read it from localStorage on user dashboard)
-    localStorage.setItem("ui_flags", JSON.stringify(data.flags ?? uiFlags));
-
-    setUiSavedMsg("Saved!");
-    setTimeout(() => setUiSavedMsg(""), 2000);
-  } catch (e: any) {
-    setUiSavedMsg(e?.message || "Failed");
-    setTimeout(() => setUiSavedMsg(""), 2500);
+  /* ===================== LOAD / SAVE UI FLAGS ===================== */
+  async function loadUIFlags() {
+    try {
+      const res = await fetch("/api/admin/ui-flags", { cache: "no-store" });
+      const data = await res.json();
+      if (data?.ok) setUiFlags(data.flags ?? DEFAULT_UI_FLAGS);
+    } catch {}
   }
-}
+
+  async function saveUIFlags() {
+    setUiSavedMsg("");
+
+    try {
+      const res = await fetch("/api/admin/ui-flags", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(uiFlags),
+      });
+
+      const data = await res.json();
+      if (!res.ok || !data?.ok) throw new Error(data?.error || "Save failed");
+
+      setUiFlags(data.flags ?? uiFlags);
+      localStorage.setItem("ui_flags", JSON.stringify(data.flags ?? uiFlags));
+
+      setUiSavedMsg("Saved!");
+      setTimeout(() => setUiSavedMsg(""), 2000);
+    } catch (e: any) {
+      setUiSavedMsg(e?.message || "Failed");
+      setTimeout(() => setUiSavedMsg(""), 2500);
+    }
+  }
 
   /* ===================== USER MANAGEMENT ===================== */
-
   async function loadUsers() {
     try {
       const res = await fetch("/api/admin/users", { cache: "no-store" });
@@ -197,7 +210,6 @@ async function saveUIFlags() {
       setTimeout(() => setUserMsg(""), 1500);
 
       await loadUsers();
-
     } catch (e: any) {
       setUserMsg(e?.message || "Could not add user.");
       setTimeout(() => setUserMsg(""), 2500);
@@ -216,7 +228,6 @@ async function saveUIFlags() {
       if (!res.ok || !data?.ok) throw new Error(data?.error || "Delete failed");
 
       await loadUsers();
-
     } catch (e: any) {
       setUserMsg(e?.message || "Could not delete user.");
       setTimeout(() => setUserMsg(""), 2500);
@@ -224,7 +235,6 @@ async function saveUIFlags() {
   }
 
   /* ===================== LOADING SCREEN ===================== */
-
   if (!ready) {
     return (
       <main className="min-h-screen bg-black text-white flex items-center justify-center">
@@ -233,24 +243,12 @@ async function saveUIFlags() {
     );
   }
 
+  const usersSorted = useMemo(() => [...users], [users]);
+
   /* ===================== MAIN ADMIN UI ===================== */
-
   return (
-    <main className="
-      min-h-screen 
-      bg-gradient-to-b from-[#0f0f14] via-[#0b0c11] to-[#050507]
-      text-white p-6 flex items-start justify-center
-    ">
-      <div className="
-        w-full max-w-2xl 
-        bg-white/10 
-        border border-white/10 
-        rounded-2xl 
-        p-6 
-        space-y-6 
-        shadow-xl
-      ">
-
+    <main className="min-h-screen bg-gradient-to-b from-[#0f0f14] via-[#0b0c11] to-[#050507] text-white p-6 flex items-start justify-center">
+      <div className="w-full max-w-2xl bg-white/10 border border-white/10 rounded-2xl p-6 space-y-6 shadow-xl">
         {/* HEADER */}
         <div className="flex items-center justify-between">
           <div>
@@ -258,11 +256,7 @@ async function saveUIFlags() {
             <p className="text-xs text-white/60">Signed in as: {email}</p>
           </div>
 
-          <span className="
-            text-[10px] px-2 py-1 
-            rounded bg-red-600/80 
-            font-bold shadow
-          ">
+          <span className="text-[10px] px-2 py-1 rounded bg-red-600/80 font-bold shadow">
             ADMIN
           </span>
         </div>
@@ -270,12 +264,7 @@ async function saveUIFlags() {
         {/* Back button */}
         <button
           onClick={() => router.push("/dashboard")}
-          className="
-            w-full py-2 rounded-md 
-            bg-white/10 hover:bg-white/15 
-            border border-white/10 
-            text-sm font-semibold
-          "
+          className="w-full py-2 rounded-md bg-white/10 hover:bg-white/15 border border-white/10 text-sm font-semibold"
         >
           ← Back to Dashboard
         </button>
@@ -290,7 +279,7 @@ async function saveUIFlags() {
               <input
                 type="checkbox"
                 checked={flags.matches}
-                onChange={(e) => setFlags(f => ({ ...f, matches: e.target.checked }))}
+                onChange={(e) => setFlags((f) => ({ ...f, matches: e.target.checked }))}
               />
             </label>
 
@@ -299,18 +288,14 @@ async function saveUIFlags() {
               <input
                 type="checkbox"
                 checked={flags.overunder}
-                onChange={(e) => setFlags(f => ({ ...f, overunder: e.target.checked }))}
+                onChange={(e) => setFlags((f) => ({ ...f, overunder: e.target.checked }))}
               />
             </label>
           </div>
 
           <button
             onClick={saveFlags}
-            className="
-              mt-4 w-full py-2 rounded-md 
-              bg-emerald-600 hover:bg-emerald-700 
-              text-sm font-semibold
-            "
+            className="mt-4 w-full py-2 rounded-md bg-emerald-600 hover:bg-emerald-700 text-sm font-semibold"
           >
             Save Changes
           </button>
@@ -318,104 +303,106 @@ async function saveUIFlags() {
           {savedMsg && <p className="mt-3 text-xs text-emerald-300">{savedMsg}</p>}
         </section>
 
-        {/* UI FLAGS (hide/show buttons for USERS) */}
-<section className="rounded-lg bg-black/30 border border-white/10 p-4">
-  <p className="text-sm font-semibold mb-3">Show / Hide buttons for USERS</p>
+        {/* UI FLAGS */}
+        <section className="rounded-lg bg-black/30 border border-white/10 p-4">
+          <p className="text-sm font-semibold mb-3">Show / Hide buttons for USERS</p>
 
-  <div className="space-y-3 text-sm">
-    <label className="flex items-center justify-between">
-      <span>MetroX: Place Trade</span>
-      <input
-        type="checkbox"
-        checked={uiFlags.metro_place_trade}
-        onChange={(e) => setUiFlags((u) => ({ ...u, metro_place_trade: e.target.checked }))}
-      />
-    </label>
+          <div className="space-y-3 text-sm">
+            <label className="flex items-center justify-between">
+              <span>MetroX: Place Trade</span>
+              <input
+                type="checkbox"
+                checked={uiFlags.metro_place_trade}
+                onChange={(e) => setUiFlags((u) => ({ ...u, metro_place_trade: e.target.checked }))}
+              />
+            </label>
 
-    <label className="flex items-center justify-between">
-      <span>MetroX: Edshell</span>
-      <input
-        type="checkbox"
-        checked={uiFlags.metro_edshell}
-        onChange={(e) => setUiFlags((u) => ({ ...u, metro_edshell: e.target.checked }))}
-      />
-    </label>
+            <label className="flex items-center justify-between">
+              <span>MetroX: Edshell</span>
+              <input
+                type="checkbox"
+                checked={uiFlags.metro_edshell}
+                onChange={(e) => setUiFlags((u) => ({ ...u, metro_edshell: e.target.checked }))}
+              />
+            </label>
 
-    <label className="flex items-center justify-between">
-      <span>MetroX: 3x Selected Digit</span>
-      <input
-        type="checkbox"
-        checked={uiFlags.metro_3x}
-        onChange={(e) => setUiFlags((u) => ({ ...u, metro_3x: e.target.checked }))}
-      />
-    </label>
+            <label className="flex items-center justify-between">
+              <span>MetroX: 3x Selected Digit</span>
+              <input
+                type="checkbox"
+                checked={uiFlags.metro_3x}
+                onChange={(e) => setUiFlags((u) => ({ ...u, metro_3x: e.target.checked }))}
+              />
+            </label>
 
-    <label className="flex items-center justify-between">
-      <span>MetroX: 5x AutoTrading</span>
-      <input
-        type="checkbox"
-        checked={uiFlags.metro_5x}
-        onChange={(e) => setUiFlags((u) => ({ ...u, metro_5x: e.target.checked }))}
-      />
-    </label>
+            <label className="flex items-center justify-between">
+              <span>MetroX: 5x AutoTrading</span>
+              <input
+                type="checkbox"
+                checked={uiFlags.metro_5x}
+                onChange={(e) => setUiFlags((u) => ({ ...u, metro_5x: e.target.checked }))}
+              />
+            </label>
 
-    <label className="flex items-center justify-between">
-      <span>MetroX: 1x Auto All Pairs</span>
-      <input
-        type="checkbox"
-        checked={uiFlags.metro_1x_auto}
-        onChange={(e) => setUiFlags((u) => ({ ...u, metro_1x_auto: e.target.checked }))}
-      />
-    </label>
+            <label className="flex items-center justify-between">
+              <span>MetroX: 1x Auto All Pairs</span>
+              <input
+                type="checkbox"
+                checked={uiFlags.metro_1x_auto}
+                onChange={(e) => setUiFlags((u) => ({ ...u, metro_1x_auto: e.target.checked }))}
+              />
+            </label>
 
-    <label className="flex items-center justify-between">
-      <span>MetroX: Fast AutoTrading</span>
-      <input
-        type="checkbox"
-        checked={uiFlags.metro_fast_auto}
-        onChange={(e) => setUiFlags((u) => ({ ...u, metro_fast_auto: e.target.checked }))}
-      />
-    </label>
+            <label className="flex items-center justify-between">
+              <span>MetroX: Fast AutoTrading</span>
+              <input
+                type="checkbox"
+                checked={uiFlags.metro_fast_auto}
+                onChange={(e) => setUiFlags((u) => ({ ...u, metro_fast_auto: e.target.checked }))}
+              />
+            </label>
 
-    <hr className="border-white/10 my-2" />
+            <hr className="border-white/10 my-2" />
 
-    <label className="flex items-center justify-between">
-      <span>SpiderX: Analyzer</span>
-      <input
-        type="checkbox"
-        checked={uiFlags.spider_analyzer}
-        onChange={(e) => setUiFlags((u) => ({ ...u, spider_analyzer: e.target.checked }))}
-      />
-    </label>
+            <label className="flex items-center justify-between">
+              <span>SpiderX: Analyzer</span>
+              <input
+                type="checkbox"
+                checked={uiFlags.spider_analyzer}
+                onChange={(e) => setUiFlags((u) => ({ ...u, spider_analyzer: e.target.checked }))}
+              />
+            </label>
 
-    <label className="flex items-center justify-between">
-      <span>SpiderX: Manual Over/Under</span>
-      <input
-        type="checkbox"
-        checked={uiFlags.spider_manual_over_under}
-        onChange={(e) => setUiFlags((u) => ({ ...u, spider_manual_over_under: e.target.checked }))}
-      />
-    </label>
+            <label className="flex items-center justify-between">
+              <span>SpiderX: Manual Over/Under</span>
+              <input
+                type="checkbox"
+                checked={uiFlags.spider_manual_over_under}
+                onChange={(e) =>
+                  setUiFlags((u) => ({ ...u, spider_manual_over_under: e.target.checked }))
+                }
+              />
+            </label>
 
-    <label className="flex items-center justify-between">
-      <span>SpiderX: Random Auto</span>
-      <input
-        type="checkbox"
-        checked={uiFlags.spider_random_auto}
-        onChange={(e) => setUiFlags((u) => ({ ...u, spider_random_auto: e.target.checked }))}
-      />
-    </label>
-  </div>
+            <label className="flex items-center justify-between">
+              <span>SpiderX: Random Auto</span>
+              <input
+                type="checkbox"
+                checked={uiFlags.spider_random_auto}
+                onChange={(e) => setUiFlags((u) => ({ ...u, spider_random_auto: e.target.checked }))}
+              />
+            </label>
+          </div>
 
-  <button
-    onClick={saveUIFlags}
-    className="mt-4 w-full py-2 rounded-md bg-emerald-600 hover:bg-emerald-700 text-sm font-semibold"
-  >
-    Save UI Changes
-  </button>
+          <button
+            onClick={saveUIFlags}
+            className="mt-4 w-full py-2 rounded-md bg-emerald-600 hover:bg-emerald-700 text-sm font-semibold"
+          >
+            Save UI Changes
+          </button>
 
-  {uiSavedMsg && <p className="mt-3 text-xs text-emerald-300">{uiSavedMsg}</p>}
-</section>
+          {uiSavedMsg && <p className="mt-3 text-xs text-emerald-300">{uiSavedMsg}</p>}
+        </section>
 
         {/* USER MANAGEMENT */}
         <section className="rounded-lg bg-black/30 border border-white/10 p-4">
@@ -424,11 +411,7 @@ async function saveUIFlags() {
 
             <button
               onClick={loadUsers}
-              className="
-                text-xs px-3 py-1 rounded 
-                bg-white/10 border border-white/10 
-                hover:bg-white/15
-              "
+              className="text-xs px-3 py-1 rounded bg-white/10 border border-white/10 hover:bg-white/15"
             >
               Refresh
             </button>
@@ -462,11 +445,7 @@ async function saveUIFlags() {
 
           <button
             onClick={addUser}
-            className="
-              mt-2 w-full py-2 rounded-md 
-              bg-sky-600 hover:bg-sky-700 
-              text-sm font-semibold
-            "
+            className="mt-2 w-full py-2 rounded-md bg-sky-600 hover:bg-sky-700 text-sm font-semibold"
           >
             Add User
           </button>
@@ -474,38 +453,64 @@ async function saveUIFlags() {
           {userMsg && <p className="mt-2 text-xs text-white/70">{userMsg}</p>}
 
           <div className="mt-4 space-y-2">
-            {users.length === 0 ? (
+            {usersSorted.length === 0 ? (
               <p className="text-xs text-white/60">No users found.</p>
             ) : (
-              users.map((u) => (
-                <div
-                  key={u.id}
-                  className="
-                    flex items-center justify-between 
-                    rounded-md border border-white/10 
-                    bg-black/20 p-2 text-sm
-                  "
-                >
-                  <div>
-                    <div className="font-semibold">{u.email}</div>
-                    <div className="text-xs text-white/60">
-                      role: {u.role}
-                      {u.created_at ? ` • ${new Date(u.created_at).toLocaleString()}` : ""}
-                    </div>
-                  </div>
+              usersSorted.map((u) => {
+                const count = toLoginCount(u.login_count);
+                const device = (u.last_login_device || "").trim();
+                const lastLogin = fmtDate(u.last_login_at);
 
-                  <button
-                    onClick={() => removeUser(u.id)}
-                    className="
-                      text-xs px-3 py-1 rounded 
-                      bg-red-600/25 border border-red-500/40 
-                      text-red-200 hover:bg-red-600/35
-                    "
+                const neverLoggedIn = count === 0 && !u.last_login_at;
+
+                return (
+                  <div
+                    key={u.id}
+                    className="flex items-center justify-between rounded-md border border-white/10 bg-black/20 p-2 text-sm"
                   >
-                    Delete
-                  </button>
-                </div>
-              ))
+                    <div className="min-w-0 pr-3">
+                      <div className="font-semibold flex items-center gap-2 min-w-0">
+                        <span className="truncate">{u.email}</span>
+
+                        {/* Login badge */}
+                        <span
+                          className="text-[10px] px-2 py-0.5 rounded-full bg-white/10 border border-white/10 text-white/80 shrink-0"
+                          title={`Login count: ${count}`}
+                        >
+                          {count} logins
+                        </span>
+
+                        {neverLoggedIn && (
+                          <span className="text-[10px] px-2 py-0.5 rounded-full bg-yellow-500/15 border border-yellow-400/20 text-yellow-200 shrink-0">
+                            Never logged in
+                          </span>
+                        )}
+                      </div>
+
+                      <div className="text-xs text-white/60 mt-1">
+                        role: {u.role}
+                        {u.created_at ? ` • created: ${new Date(u.created_at).toLocaleString()}` : ""}
+                      </div>
+
+                      <div className="text-xs text-white/60 mt-1">
+                        last login: <span className="text-white/80">{lastLogin}</span>
+                        {" • "}
+                        device:{" "}
+                        <span className={device ? "text-white/80" : "text-white/50"}>
+                          {device || "—"}
+                        </span>
+                      </div>
+                    </div>
+
+                    <button
+                      onClick={() => removeUser(u.id)}
+                      className="text-xs px-3 py-1 rounded bg-red-600/25 border border-red-500/40 text-red-200 hover:bg-red-600/35 shrink-0"
+                    >
+                      Delete
+                    </button>
+                  </div>
+                );
+              })
             )}
           </div>
         </section>
@@ -513,11 +518,7 @@ async function saveUIFlags() {
         {/* LOGOUT */}
         <button
           onClick={logout}
-          className="
-            w-full py-2 rounded-md 
-            bg-red-600 hover:bg-red-700 
-            text-sm font-semibold
-          "
+          className="w-full py-2 rounded-md bg-red-600 hover:bg-red-700 text-sm font-semibold"
         >
           Logout
         </button>

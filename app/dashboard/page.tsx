@@ -17,6 +17,7 @@ export const INDEX_GROUPS = {
     { code: "1HZ10V", label: "Volatility 10 (1s) Index" },
     {code: "1HZ15V", label: "Volatility 15 (1s) Index" },
     { code: "1HZ25V", label: "Volatility 25 (1s) Index" },
+    {code: "1HZ30V", label: "Volatility 30 (1s) Index" },
     { code: "1HZ50V", label: "Volatility 50 (1s) Index" },
     { code: "1HZ75V", label: "Volatility 75 (1s) Index" },
     {code: "1HZ90V", label: "Volatility 90 (1s) Index" },
@@ -46,6 +47,7 @@ export const PAIRS = [
   "1HZ10V",
   "1HZ15V",
   "1HZ25V",
+  "1HZ30V",
   "1HZ50V",
   "1HZ75V",
   "1HZ90V",
@@ -67,7 +69,7 @@ type TradeResult = "Win" | "Loss" | "Pending";
 type TradeType = "Matches" | "Differs" | "Over" | "Under";
 
 type Trade = {
-  source?: "MetroX" | "SpiderX" | "SpiderX Auto";
+  source?: "MetroX" | "SpiderX" | "SpiderX Auto" | "Edshell";
   id: number; // req_id
   contract_id?: number;
 
@@ -86,6 +88,8 @@ type Trade = {
 
   result: TradeResult;
   createdAt: number;
+    batchIndex?: number; // 1,2,3...
+  batchTotal?: number; // 3 or 5
 };
 
 const CONTRACT_TYPE_MAP: Record<TradeType, string> = {
@@ -101,6 +105,102 @@ function sleep(ms: number) {
 
 function formatTime(ms: number) {
   return new Date(ms).toLocaleString();
+}
+function MarketIndicator({
+  activeStrategy,
+  selectedPair,
+}: {
+  activeStrategy: "matches" | "overunder" | null;
+  selectedPair: Pair;
+}) {
+  const [now, setNow] = useState(() => new Date());
+
+  useEffect(() => {
+    const t = window.setInterval(() => setNow(new Date()), 1000);
+    return () => window.clearInterval(t);
+  }, []);
+
+  // Use UTC sessions (simple + consistent)
+  const utcH = now.getUTCHours();
+  const utcM = now.getUTCMinutes();
+  const utcTotalMin = utcH * 60 + utcM;
+
+  const localDay = now.getDay(); // 0 Sun ... 6 Sat
+  const isWeekend = localDay === 0 || localDay === 6;
+
+  // Simple session windows (UTC)
+  const inAsia = utcTotalMin >= 0 * 60 && utcTotalMin < 9 * 60;
+  const inLondon = utcTotalMin >= 8 * 60 && utcTotalMin < 17 * 60;
+  const inNY = utcTotalMin >= 13 * 60 && utcTotalMin < 22 * 60;
+
+  const overlap = (inAsia && inLondon) || (inLondon && inNY);
+
+  const zone = overlap
+    ? "Overlap (higher movement)"
+    : inNY
+    ? "New York"
+    : inLondon
+    ? "London"
+    : inAsia
+    ? "Asia (Tokyo)"
+    : "Off-hours";
+
+  const nextRecommendation =
+    overlap ? "Best time (if you’re focused)" : zone === "Off-hours" ? "Not ideal (more randomness)" : "Okay time";
+
+  const stratName =
+    activeStrategy === "matches" ? "MetroX" : activeStrategy === "overunder" ? "SpiderX" : "No strategy selected";
+
+  // Very light index guidance (you can tweak later)
+  const indexTip =
+    activeStrategy === "matches"
+      ? "MetroX: prefer R_25 / R_50 (or 1HZ if you want faster)."
+      : activeStrategy === "overunder"
+      ? "SpiderX: start with R_50 / R_75, only trade strong % signals."
+      : "Pick a strategy to see index tips.";
+
+  return (
+    <div className="bg-[#13233d]/80 backdrop-blur rounded-2xl p-5 border border-white/10 shadow-[0_0_0_1px_rgba(255,255,255,0.06)]">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <p className="font-semibold text-white/85 tracking-tight">🕒 Market / Timing</p>
+          <p className="text-xs text-white/60 mt-1">
+            Strategy: <span className="text-white/80 font-semibold">{stratName}</span> • Index:{" "}
+            <span className="text-white/80 font-semibold">{selectedPair}</span>
+          </p>
+        </div>
+
+        <span className="px-3 py-1 rounded-full text-xs border border-white/10 bg-black/20 text-white/70">
+          UTC {String(utcH).padStart(2, "0")}:{String(utcM).padStart(2, "0")}
+        </span>
+      </div>
+
+      <div className="mt-3 grid grid-cols-2 gap-3 text-sm">
+        <div className="rounded-xl bg-black/20 border border-white/10 p-3">
+          <p className="text-[11px] text-white/60">Current Zone</p>
+          <p className={`mt-1 font-bold ${overlap ? "text-emerald-300" : "text-sky-300"}`}>{zone}</p>
+          <p className="text-[11px] text-white/55 mt-1">{nextRecommendation}</p>
+        </div>
+
+        <div className="rounded-xl bg-black/20 border border-white/10 p-3">
+          <p className="text-[11px] text-white/60">When NOT to trade</p>
+          <ul className="mt-1 text-[11px] text-white/70 space-y-1 list-disc pl-4">
+            <li>{isWeekend ? "Weekend: trade only if disciplined." : "Weekday: normal routine."}</li>
+            <li>Off-hours: avoid if you’re tired / rushed.</li>
+            <li>No signal = no trade.</li>
+          </ul>
+        </div>
+      </div>
+
+      <div className="mt-3 rounded-xl bg-white/5 border border-white/10 p-3">
+        <p className="text-[11px] text-white/60">Index recommendation</p>
+        <p className="text-xs text-white/75 mt-1">{indexTip}</p>
+        <p className="text-[11px] text-white/50 mt-2">
+          Note: Synthetic indices run 24/7 — sessions are for *your* timing/discipline.
+        </p>
+      </div>
+    </div>
+  );
 }
 
 /** ================= ADMIN STRATEGY FLAGS (NEW) =================
@@ -742,15 +842,12 @@ pairDigitsRef.current[symbol] = next;
   durationTicks: number;
   count?: 1 | 3 | 5;
 }) => {
-  for (let i = 0; i < count; i++) {
-    const now = Date.now();
-    const wait = Math.max(0, MIN_TRADE_INTERVAL_MS - (now - lastEdshellAtRef.current));
-    if (wait) await sleep(wait);
-    lastEdshellAtRef.current = Date.now();
-
-    // currently Edshell is Differs-only, this line is fine
-    await placeDiffersInstant(symbol, digit, 1);
-  }
+  await placeDiffersInstant(symbol, digit, count, {
+    durationTicks,
+    source: "Edshell",
+    batchTotal: count,
+    batchStartIndex: 1,
+  });
 };
   const placeTrade = (type: TradeType, durationTicks: number) => {
     if (selectedDigit === null) return alert("Select a digit first");
@@ -792,9 +889,24 @@ pairDigitsRef.current[symbol] = next;
 
   // Place one DIFFERS trade for symbol+digit and wait for buy-ack (safe for fast bursts)
   // ⚡ Instant parallel DIFFERS (no waiting)
-const placeDiffersInstant = async (symbol: Pair, digit: number, count: number) => {
+// ⚡ Instant parallel DIFFERS (no waiting)
+const placeDiffersInstant = async (
+  symbol: Pair,
+  digit: number,
+  count: number,
+  opts?: {
+    durationTicks?: number;
+    source?: Trade["source"];
+    batchTotal?: number;
+    batchStartIndex?: number; // default 1
+  }
+) => {
   if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
   if (!authorizedRef.current) return;
+
+  const durationTicks = opts?.durationTicks ?? mdTickDuration;
+  const source = opts?.source ?? "MetroX";
+  const startIndex = opts?.batchStartIndex ?? 1;
 
   for (let i = 0; i < count; i++) {
     const req_id = newReqId();
@@ -805,21 +917,23 @@ const placeDiffersInstant = async (symbol: Pair, digit: number, count: number) =
       digit,
       type: "Differs",
       stake,
-      durationTicks: 1,
+      durationTicks,          // ✅ FIX: store the real tick duration
       result: "Pending",
       createdAt: Date.now(),
+      source, 
+      batchIndex: opts?.batchTotal ? startIndex + i : undefined,
+batchTotal: opts?.batchTotal,                // ✅ FIX: label the trade source
     };
 
     setTradeHistory((prev: Trade[]) => [trade, ...prev]);
 
     reqInfoRef.current[req_id] = {
-  symbol,
-  digit,
-  type: "Differs",
-  stake,
-  turbo: true,
-};
-
+      symbol,
+      digit,
+      type: "Differs",
+      stake,
+      turbo: true,
+    };
 
     safeSend({
       proposal: 1,
@@ -828,7 +942,7 @@ const placeDiffersInstant = async (symbol: Pair, digit: number, count: number) =
       contract_type: CONTRACT_TYPE_MAP["Differs"],
       currency: currency || "USD",
       symbol,
-      duration: mdTickDuration,
+      duration: durationTicks,  // ✅ FIX: duration matches what's stored
       duration_unit: "t",
       barrier: String(digit),
       req_id,
@@ -838,7 +952,11 @@ const placeDiffersInstant = async (symbol: Pair, digit: number, count: number) =
     await new Promise((r) => setTimeout(r, 0));
   }
 };
-  const placeDiffersAndWaitBuyAck = async (symbol: Pair, digit: number) => {
+  const placeDiffersAndWaitBuyAck = async (
+  symbol: Pair,
+  digit: number,
+  batch?: { index: number; total: number }
+) => {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) throw new Error("WebSocket not connected");
     if (!authorizedRef.current) throw new Error("Not authorized");
 
@@ -853,6 +971,8 @@ const placeDiffersInstant = async (symbol: Pair, digit: number, count: number) =
       durationTicks: 1,
       result: "Pending",
       createdAt: Date.now(),
+      batchIndex: batch?.index,
+batchTotal: batch?.total,
     };
 
     setTradeHistory((prev: Trade[]) => [trade, ...prev]);
@@ -897,13 +1017,13 @@ const placeDiffersInstant = async (symbol: Pair, digit: number, count: number) =
   const gapMs = turboMode ? 0 : 50;
 
   try {
-    await placeDiffersAndWaitBuyAck(selectedPair, selectedDigit);
-    if (gapMs) await sleep(gapMs);
+    await placeDiffersAndWaitBuyAck(selectedPair, selectedDigit, { index: 1, total: 3 });
+if (gapMs) await sleep(gapMs);
 
-    await placeDiffersAndWaitBuyAck(selectedPair, selectedDigit);
-    if (gapMs) await sleep(gapMs);
+await placeDiffersAndWaitBuyAck(selectedPair, selectedDigit, { index: 2, total: 3 });
+if (gapMs) await sleep(gapMs);
 
-    await placeDiffersAndWaitBuyAck(selectedPair, selectedDigit);
+await placeDiffersAndWaitBuyAck(selectedPair, selectedDigit, { index: 3, total: 3 });
   } catch (err) {
     alert(err instanceof Error ? err.message : "We couldn't process your trade.");
   } finally {
@@ -985,9 +1105,12 @@ const placeDiffersInstant = async (symbol: Pair, digit: number, count: number) =
       try {
   if (turboMode) {
     // ⚡ MAX TURBO — no waiting
-    placeDiffersInstant(s.pair, s.lowestDigit, 1);
+    placeDiffersInstant(s.pair, s.lowestDigit, 1, {
+  batchTotal: 5,
+  batchStartIndex: placed + 1,
+});
   } else {
-    await placeDiffersAndWaitBuyAck(s.pair, s.lowestDigit);
+    await placeDiffersAndWaitBuyAck(s.pair, s.lowestDigit, { index: placed + 1, total: 5 });
     if (gapMs) await sleep(gapMs);
   }
 
@@ -1321,7 +1444,7 @@ const toggleSpiderRandomAuto = async () => {
             </div>
           </div>
 
-          <nav className="flex items-center gap-6 text-sm text-gray-300">
+          <nav className="hidden md:flex items-center gap-6 text-sm text-gray-300">
             <span className="text-green-400">● {connected ? "Connected" : "Disconnected"}</span>
             <button onClick={() => router.push("/")}>Home</button>
 
@@ -1341,7 +1464,7 @@ const toggleSpiderRandomAuto = async () => {
         </header>
 
         {/* PAGE HEADER */}
-        <section className="px-8 py-6">
+        <section className="mx-auto w-full max-w-7xl px-4 sm:px-6 lg:px-8 py-6">
           <div className="glass-panel p-6 flex justify-between items-center
   bg-gradient-to-r from-orange-500/30 via-orange-600/20 to-purple-700/20">
             <div>
@@ -1376,17 +1499,19 @@ const toggleSpiderRandomAuto = async () => {
         </section>
 
         {/* MAIN GRID */}
-        <section className="px-8 pb-8 grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <section className="mx-auto w-full max-w-7xl px-4 sm:px-6 lg:px-8 pb-8 grid grid-cols-1 lg:grid-cols-2 gap-6">
           {/* LEFT */}
           <div className="space-y-6">
             <div className="bg-[#13233d]/80 backdrop-blur rounded-2xl p-6 border border-white/10 shadow-[0_0_0_1px_rgba(255,255,255,0.06)]">
               <h2 className="font-semibold mb-4 text-white/85 tracking-tight">Deriv API Connection</h2>
 
-              <div className="grid grid-cols-2 lg:grid-cols-3 gap-4 text-sm">
+              <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4 text-sm">
                 <div className="bg-black/30 rounded-xl p-4 border border-white/10">
                   <p className="text-white/55 text-xs uppercase tracking-wide">Account Status</p>
                   <p className="font-semibold text-green-400">{connected ? "Connected" : "Disconnected"}</p>
                 </div>
+                {/* ✅ Market / Timing Indicator */}
+
 
                 <div className="bg-black/30 rounded-xl p-4 border border-white/10">
                   <p className="text-white/55 text-xs uppercase tracking-wide">Account Balance</p>
@@ -1404,7 +1529,10 @@ const toggleSpiderRandomAuto = async () => {
                 </div>
               </div>
             </div>
-
+            <div className="bg-[#13233d]/80 backdrop-blur rounded-2xl p-6 border border-white/10 shadow-[0_0_0_1px_rgba(255,255,255,0.06)]">
+  <h2 className="font-semibold mb-4 text-white/85 tracking-tight">Market / Timing</h2>
+  <MarketIndicator activeStrategy={activeStrategy} selectedPair={selectedPair} />
+</div>
             <div className="bg-[#13233d]/80 backdrop-blur rounded-2xl p-6 border border-white/10 shadow-[0_0_0_1px_rgba(255,255,255,0.06)]">
               <h2 className="font-semibold mb-4 text-white/85 tracking-tight">Trading Strategies</h2>
 
@@ -1664,6 +1792,11 @@ function MetroXPanel({
   };
   const [edshellCount, setEdshellCount] = useState<1 | 3 | 5>(1);
 const [edshellScope, setEdshellScope] = useState<"current" | "scan">("current");
+// ✅ Digit preview for EDSHELL (Current Index only)
+const edshellPreviewDigit =
+  edshellScope === "current" && pairMeta[selectedPair]?.count >= 20
+    ? (pairMeta[selectedPair]?.lowDigit ?? null)
+    : null;
 const [metroXPressed, setMetroXPressed] = useState(false);
 const [edshellPlacing, setEdshellPlacing] = useState(false);
 const [edshellPlaced, setEdshellPlaced] = useState(false);
@@ -1910,7 +2043,7 @@ const canShow = (key: keyof UIFlags) => isAdmin || uiFlags[key] !== false;
               <button
                 key={d}
                 onClick={() => setSelectedDigit(d)}
-                className={`relative rounded-full py-3 text-center border transition ${cls}`}
+                className={`relative rounded-full py-3 sm:py-4 text-center border transition ${cls}`}
               >
                 {selected && <span className="absolute top-2 right-3 text-white text-sm">✓</span>}
                 {!selected && won && <span className="absolute top-2 right-3 text-emerald-100 text-sm">💰</span>}
@@ -2030,66 +2163,128 @@ const canShow = (key: keyof UIFlags) => isAdmin || uiFlags[key] !== false;
   {canShow("metro_edshell") && (
     <div className="space-y-2">
       <button
-        disabled={edshellPlacing}
-        onClick={async () => {
-  if (edshellPlacing) return;
+  disabled={edshellPlacing}
+  onClick={async () => {
+    if (edshellPlacing) return;
 
-  setEdshellPlacing(true);
+    // basic validation
+    if (!stake || stake <= 0) return alert("Enter a stake amount first.");
+    if (mdTickDuration < 1) return alert("Tick Duration must be at least 1.");
 
-  try {
-    // default = current index
-    let pickPair: Pair = selectedPair;
+    setEdshellPlaced(false);
+    setEdshellPlacing(true);
 
-    // if "Scan All" is selected, choose best pair
-    if (edshellScope === "scan") {
-      let bestPair: Pair | null = null;
-      let bestPct = Infinity;
+    try {
+      let pickPair: Pair | null = null;
+      let pickDigit: number | null = null;
+      let pickPct: number | null = null;
 
-      for (const p of PAIRS) {
-        const m = pairMeta[p];
-        if (!m || m.count < 20) continue;
-        if (typeof m.lowPct !== "number") continue;
+      // ---------- CURRENT INDEX ----------
+      if (edshellScope === "current") {
+        const m = pairMeta[selectedPair];
 
-        if (m.lowPct < bestPct) {
-          bestPct = m.lowPct;
-          bestPair = p;
+        if (!m || m.count < 20) {
+          alert("EDSHELL needs at least 20 cached ticks on the current index.");
+          return;
         }
+        if (typeof m.lowDigit !== "number" || typeof m.lowPct !== "number") {
+          alert("EDSHELL signal not ready yet (missing lowDigit/lowPct).");
+          return;
+        }
+
+        pickPair = selectedPair;
+        pickDigit = m.lowDigit;
+        pickPct = m.lowPct;
       }
 
-      if (!bestPair) {
-        alert("Scan All needs at least 20 cached ticks on some pairs.");
+      // ---------- SCAN ALL ----------
+      if (edshellScope === "scan") {
+        let bestPair: Pair | null = null;
+        let bestPct = Infinity;
+
+        for (const p of PAIRS) {
+          const m = pairMeta[p];
+          if (!m || m.count < 20) continue;
+          if (typeof m.lowPct !== "number") continue;
+
+          if (m.lowPct < bestPct) {
+            bestPct = m.lowPct;
+            bestPair = p;
+          }
+        }
+
+        if (!bestPair) {
+          alert("Scan All needs at least 20 cached ticks on some pairs.");
+          return;
+        }
+
+        // ✅ HARD RULE: only trade if best pair <= 2.0%
+        if (bestPct > 2.0) {
+          alert(
+            `No trade: best pair is ${bestPair} at ${bestPct.toFixed(1)}% (needs ≤ 2.0%).`
+          );
+          return;
+        }
+
+        const bm = pairMeta[bestPair];
+        if (!bm || typeof bm.lowDigit !== "number" || typeof bm.lowPct !== "number") {
+          alert("Scan All best pair signal not ready yet.");
+          return;
+        }
+
+        pickPair = bestPair;
+        pickDigit = bm.lowDigit;
+        pickPct = bm.lowPct;
+      }
+
+      if (pickPair === null || pickDigit === null) {
+        alert("EDSHELL could not select a pair/digit.");
         return;
       }
 
-      pickPair = bestPair;
+      await placeTradeFor({
+        symbol: pickPair,
+        digit: pickDigit,
+        type: "Differs",
+        durationTicks: mdTickDuration,
+        count: edshellCount,
+      });
+
+      setEdshellPlaced(true);
+      setTimeout(() => setEdshellPlaced(false), 1200);
+    } finally {
+      setEdshellPlacing(false);
     }
+  }}
+  className={`relative w-full rounded-md py-4 text-sm font-extrabold tracking-wide border
+    shadow-[0_0_0_1px_rgba(255,255,255,0.10)] transition active:scale-[0.98]
+    ${
+      edshellPlacing
+        ? "cursor-not-allowed bg-yellow-400/60 text-black border-yellow-200/60 animate-pulse"
+        : edshellPlaced
+        ? "bg-emerald-500 text-white border-emerald-300 shadow-[0_0_25px_rgba(16,185,129,0.6)]"
+        : "bg-yellow-400 text-black border-yellow-200 hover:bg-yellow-300 shadow-[0_0_22px_rgba(250,204,21,0.55)]"
+    }`}
+>
+  <span>
+    {edshellPlacing ? "🧠 PLACING..." : edshellPlaced ? "✅ DONE" : "🧠 EDSHELL"}
+  </span>
 
-    const digit = pairMeta[pickPair]?.lowDigit ?? 0;
-
-    await placeTradeFor({
-      symbol: pickPair,
-      digit,
-      type: "Differs",
-      durationTicks: mdTickDuration,
-      count: edshellCount,
-    });
-
-    setEdshellPlaced(true);
-    setTimeout(() => setEdshellPlaced(false), 1500);
-  } finally {
-    setEdshellPlacing(false);
-  }
-}}
-        className={`w-full rounded-md py-4 text-lg font-bold transition ${
-          edshellPlacing
-            ? "bg-red-600 animate-pulse"
-            : edshellPlaced
-            ? "bg-green-600"
-            : "bg-yellow-500 hover:bg-yellow-600"
+  {edshellScope === "current" && (
+    <span
+      className={`absolute right-4 top-1/2 -translate-y-1/2 px-3 py-1 rounded-full text-sm font-extrabold
+        border border-black/20 bg-black/25
+        ${
+          edshellPreviewDigit !== null
+            ? "text-white drop-shadow-[0_0_12px_rgba(255,255,255,0.85)] shadow-[0_0_18px_rgba(250,204,21,0.75)]"
+            : "text-white/70"
         }`}
-      >
-        {edshellPlacing ? "🧠 PLACING..." : edshellPlaced ? "✅ DONE" : "🧠 EDSHELL"}
-      </button>
+      title="Least frequent digit (last 20 ticks)"
+    >
+      {edshellPreviewDigit !== null ? `🎯 ${edshellPreviewDigit}` : "…"}
+    </span>
+  )}
+</button>
 
       <div className="grid grid-cols-2 gap-2">
         <select
@@ -2228,156 +2423,254 @@ function TradeHistoryMetroLike({
     return true;
   });
 
+  // Index label (nice names like screenshot)
+  const getIndexLabel = (sym: Pair) => {
+    const vol = INDEX_GROUPS.volatility.find((x) => x.code === sym)?.label;
+    const jump = INDEX_GROUPS.jump.find((x) => x.code === sym)?.label;
+    return vol || jump || sym;
+  };
+
+  const pillForResult = (r: TradeResult) => {
+    if (r === "Win") return "bg-emerald-500/15 border-emerald-400/25 text-emerald-200";
+    if (r === "Loss") return "bg-red-500/15 border-red-400/25 text-red-200";
+    return "bg-yellow-500/15 border-yellow-400/25 text-yellow-200";
+  };
+
+  // This is what will show as “button / strategy used”
+  // Uses your existing data (t.source + t.type) with a clean label.
+  const getActionLabel = (t: Trade) => {
+  // ✅ if source exists, just show it (covers SpiderX Auto, SpiderX, MetroX, Edshell)
+  if (t.source) return t.source;
+
+  // fallback for older trades without source
+  if (t.type === "Differs") return "Fast DIFFERS";
+  if (t.type === "Matches") return "MATCHES";
+  if (t.type === "Over") return "OVER";
+  if (t.type === "Under") return "UNDER";
+
+  return "MetroX";
+};
+
+  const TabBtn = ({
+    active,
+    onClick,
+    children,
+  }: {
+    active: boolean;
+    onClick: () => void;
+    children: React.ReactNode;
+  }) => (
+    <button
+      onClick={onClick}
+      className={`flex-1 rounded-xl px-3 py-2 text-xs font-semibold border transition
+        ${
+          active
+            ? "bg-cyan-500/15 border-cyan-400/25 text-cyan-100"
+            : "bg-white/[0.04] border-white/10 text-white/65 hover:bg-white/[0.07]"
+        }`}
+    >
+      {children}
+    </button>
+  );
+
   return (
-    <div className="mt-6 rounded-xl bg-gradient-to-br from-[#0f1b2d] to-[#0b1220] border border-white/10 p-4">
-      <div className="flex items-center justify-between mb-3">
-        <div className="flex items-center gap-2">
-          <span className="w-8 h-8 rounded-lg bg-white/5 border border-white/10 flex items-center justify-center">🏆</span>
-          <p className="font-semibold text-white/90">Trade History</p>
+    <div className="mt-6 rounded-2xl border border-white/10 bg-gradient-to-br from-[#0f1b2d]/90 to-[#0b1220]/90 p-4 shadow-[0_20px_80px_rgba(0,0,0,0.45)]">
+      {/* Header */}
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <div className="h-10 w-10 rounded-2xl bg-cyan-500/10 border border-cyan-400/20 flex items-center justify-center">
+            <span className="text-cyan-200">⏳</span>
+          </div>
+          <div>
+            <p className="text-sm font-semibold text-cyan-100">Trade History</p>
+            <p className="text-[11px] text-white/45">Entry • Exit • Payout • Strategy</p>
+          </div>
         </div>
 
         <button
           onClick={onClear}
           title="Clear trade history"
-          className="w-9 h-9 rounded-full bg-red-600/20 border border-red-500/40 text-red-300 hover:bg-red-600/30 hover:text-red-200 transition"
+          className="h-10 w-10 rounded-2xl bg-red-500/10 border border-red-400/20 text-red-200 hover:bg-red-500/20 transition"
         >
           🗑
         </button>
       </div>
 
-      <div className="grid grid-cols-2 gap-3 mb-4">
-        <div className="rounded-lg bg-white/5 border border-white/10 p-3">
-          <p className="text-xs text-white/60">Net Profit/Loss</p>
-          <p className={`text-2xl font-bold ${netProfit >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+      {/* Stats row */}
+      <div className="mt-4 grid grid-cols-2 gap-3">
+        <div className="rounded-2xl border border-white/10 bg-white/[0.04] p-4">
+          <p className="text-[11px] text-white/55">Net Profit/Loss</p>
+          <p className={`mt-2 text-2xl font-extrabold ${netProfit >= 0 ? "text-emerald-300" : "text-red-300"}`}>
             {netProfit >= 0 ? "+" : ""}
-            {netProfit.toFixed(2)} {currency}
+            {netProfit.toFixed(2)} <span className="text-white/60">{currency}</span>
           </p>
         </div>
 
-        <div className="rounded-lg bg-white/5 border border-white/10 p-3">
-          <p className="text-xs text-white/60">Win Rate</p>
-          <p className="text-2xl font-bold text-sky-300">
-            {winRate.toFixed(1)}% <span className="text-xs text-white/50">({wins}/{done || 0})</span>
+        <div className="rounded-2xl border border-white/10 bg-white/[0.04] p-4">
+          <p className="text-[11px] text-white/55">Win Rate</p>
+          <p className="mt-2 text-2xl font-extrabold text-sky-300">
+            {winRate.toFixed(1)}%{" "}
+            <span className="text-xs text-white/50 font-semibold">
+              ({wins}/{done || 0})
+            </span>
           </p>
         </div>
       </div>
 
-      <div className="flex gap-2 mb-3">
-        <button
-          onClick={() => setTab("all")}
-          className={`flex-1 rounded-full py-2 text-xs border ${
-            tab === "all" ? "bg-sky-600/25 border-sky-500/30 text-white" : "bg-white/5 border-white/10 text-white/70"
-          }`}
-        >
-          🧾 All Trades ({tradeHistory.length})
-        </button>
-
-        <button
-          onClick={() => setTab("wins")}
-          className={`flex-1 rounded-full py-2 text-xs border ${
-            tab === "wins"
-              ? "bg-emerald-600/20 border-emerald-500/30 text-white"
-              : "bg-white/5 border-white/10 text-white/70"
-          }`}
-        >
-          ✅ Wins ({wins})
-        </button>
-
-        <button
-          onClick={() => setTab("losses")}
-          className={`flex-1 rounded-full py-2 text-xs border ${
-            tab === "losses"
-              ? "bg-red-600/20 border-red-500/30 text-white"
-              : "bg-white/5 border border-white/10 text-white/70"
-          }`}
-        >
-          ❌ Losses ({losses})
-        </button>
+      {/* Tabs */}
+      <div className="mt-4 grid grid-cols-3 gap-2">
+        <TabBtn active={tab === "all"} onClick={() => setTab("all")}>
+          All Trades ({tradeHistory.length})
+        </TabBtn>
+        <TabBtn active={tab === "wins"} onClick={() => setTab("wins")}>
+          Wins ({wins})
+        </TabBtn>
+        <TabBtn active={tab === "losses"} onClick={() => setTab("losses")}>
+          Losses ({losses})
+        </TabBtn>
       </div>
 
-      <div className="max-h-72 overflow-y-auto space-y-3 pr-1">
+      {/* List */}
+      <div className="mt-4 max-h-80 overflow-y-auto space-y-3 pr-1">
         {filtered.length === 0 ? (
-          <div className="rounded-lg bg-white/5 border border-white/10 p-3 text-xs text-white/60">No trades in this tab.</div>
+          <div className="rounded-2xl border border-white/10 bg-white/[0.04] p-4 text-sm text-white/60">
+            No trades in this tab.
+          </div>
         ) : (
           filtered.map((t, idx) => {
-            const pillColor =
-              t.result === "Pending"
-                ? "bg-yellow-500/15 border-yellow-400/20 text-yellow-200"
-                : t.result === "Win"
-                ? "bg-emerald-500/15 border-emerald-400/20 text-emerald-200"
-                : "bg-red-500/15 border-red-400/20 text-red-200";
-
             const profitVal = Number(t.profit ?? 0);
-            const profitText = t.result === "Pending" ? "" : `${profitVal >= 0 ? "+" : ""}${profitVal.toFixed(2)} ${currency}`;
+
+            const profitText =
+              t.result === "Pending"
+                ? ""
+                : `${profitVal >= 0 ? "+" : ""}${profitVal.toFixed(2)} ${currency}`;
 
             const statusLabel =
-              t.result === "Pending" ? "Pending" : t.result === "Win" ? "Completed - Won" : "Completed - Lost";
+              t.result === "Pending"
+                ? "Pending"
+                : t.result === "Win"
+                ? "Completed - Won"
+                : "Completed - Lost";
+
+            const actionLabel = getActionLabel(t);
 
             return (
-              <div key={idx} className="rounded-xl bg-white/5 border border-white/10 p-3">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <span className="text-sm font-semibold">{t.symbol}</span>
-                    <span className={`text-[11px] px-2 py-0.5 rounded-full border ${pillColor}`}>
-                      {t.result === "Win" ? "WON" : t.result === "Loss" ? "LOST" : "PENDING"}
-                    </span>
+              <div
+                key={idx}
+                className="rounded-2xl border border-white/10 bg-white/[0.04] p-4 shadow-[0_0_0_1px_rgba(255,255,255,0.02)]"
+              >
+                {/* Top Row (index + result + profit like screenshot) */}
+                <div className="flex items-start justify-between gap-3">
+                  <div className="flex items-start gap-3">
+                    <div className="h-10 w-10 rounded-2xl bg-emerald-500/10 border border-emerald-400/15 flex items-center justify-center">
+                      <span className="text-emerald-200">📈</span>
+                    </div>
+
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <p className="text-sm font-extrabold text-white/90">{t.symbol}</p>
+
+                        <span className={`text-[10px] px-2 py-0.5 rounded-full border ${pillForResult(t.result)}`}>
+                          {t.result === "Win" ? "WON" : t.result === "Loss" ? "LOST" : "PENDING"}
+                        </span>
+                        {t.batchIndex && t.batchTotal && (
+  <span className="text-[10px] px-2 py-0.5 rounded-full border border-white/10 bg-black/20 text-white/70">
+    {t.batchIndex}/{t.batchTotal}
+  </span>
+)}
+                      </div>
+
+                      <p className="mt-1 text-[11px] text-white/55 font-semibold">
+                        {getIndexLabel(t.symbol)}
+                      </p>
+
+                      {/* Strategy / button used */}
+                      <div className="mt-2 inline-flex items-center gap-2">
+                        <span className="text-[10px] px-2 py-0.5 rounded-full border border-white/10 bg-black/20 text-white/70">
+                          {actionLabel}
+                        </span>
+
+                        <span className="text-[10px] px-2 py-0.5 rounded-full border border-purple-400/20 bg-purple-500/10 text-purple-200">
+                          {t.type.toUpperCase()}
+                        </span>
+                      </div>
+                    </div>
                   </div>
 
+                  <div className="text-right">
+                    <p
+                      className={`text-sm font-extrabold ${
+                        t.result === "Win"
+                          ? "text-emerald-300"
+                          : t.result === "Loss"
+                          ? "text-red-300"
+                          : "text-white/60"
+                      }`}
+                    >
+                      {profitText || "—"}
+                    </p>
+                    <p className="mt-1 text-[11px] text-white/55">
+                      Stake: {t.stake.toFixed(2)} {currency}
+                    </p>
+                    <p className="text-[11px] text-white/55">
+                      Payout: {typeof t.payout === "number" ? `${t.payout.toFixed(2)} ${currency}` : "—"}
+                    </p>
+                  </div>
+                </div>
+
+                {/* Middle Row (Entry / Exit / Payout like screenshot) */}
+                <div className="mt-4 grid grid-cols-3 gap-2">
+                  <div className="rounded-xl border border-white/10 bg-black/15 px-3 py-2">
+                    <p className="text-[10px] uppercase tracking-wide text-white/45">Entry</p>
+                    <div className="mt-1 flex items-center justify-between">
+                      <span className="text-xs text-white/70">Digit</span>
+                      <span className="text-xs font-extrabold text-white/90">
+                        {t.digit}
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="rounded-xl border border-white/10 bg-black/15 px-3 py-2">
+                    <p className="text-[10px] uppercase tracking-wide text-white/45">Exit</p>
+                    <div className="mt-1 flex items-center justify-between">
+                      <span className="text-xs text-white/70">Digit</span>
+                      <span className="text-xs font-extrabold text-white/90">
+                        {typeof t.settlementDigit === "number" ? t.settlementDigit : "—"}
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="rounded-xl border border-white/10 bg-black/15 px-3 py-2">
+                    <p className="text-[10px] uppercase tracking-wide text-white/45">Payout</p>
+                    <div className="mt-1 flex items-center justify-between">
+                      <span className="text-xs text-white/70">{t.type.toUpperCase()}</span>
+                      <span className="text-xs font-extrabold text-white/90">
+                        {typeof t.payout === "number" ? t.payout.toFixed(2) : "—"}{" "}
+                        <span className="text-white/60">{currency}</span>
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Bottom row (Status) */}
+                <div className="mt-3 flex items-center justify-between rounded-xl border border-white/10 bg-black/10 px-3 py-2">
+                  <div className="text-[11px] text-white/55">Status</div>
                   <div
-                    className={`text-sm font-semibold ${
-                      t.result === "Win" ? "text-emerald-300" : t.result === "Loss" ? "text-red-300" : "text-white/60"
+                    className={`text-[11px] font-semibold ${
+                      t.result === "Win"
+                        ? "text-emerald-300"
+                        : t.result === "Loss"
+                        ? "text-red-300"
+                        : "text-yellow-300"
                     }`}
                   >
-                    {profitText}
+                    {statusLabel}
                   </div>
                 </div>
 
-                <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px]">
-                  <span className="px-2 py-0.5 rounded-full border border-white/10 bg-black/10 text-white/70">
-  {t.source ?? (t.type === "Over" || t.type === "Under" ? "SpiderX" : "MetroX")}
-</span>
-                  <span className="px-2 py-0.5 rounded-full border border-white/10 bg-black/10 text-white/70">
-                    {t.durationTicks} tick{t.durationTicks > 1 ? "s" : ""}
-                  </span>
-                  <span className="px-2 py-0.5 rounded-full border border-white/10 bg-black/10 text-white/70">
-                    Entry: {t.type.toUpperCase()} {t.digit}
-                  </span>
-                  <span className="px-2 py-0.5 rounded-full border border-white/10 bg-black/10 text-white/70">
-                    Exit Digit: {typeof t.settlementDigit === "number" ? t.settlementDigit : "-"}
-                  </span>
-                </div>
-
-                <div className="mt-3 grid grid-cols-2 gap-2 text-xs text-white/70">
-                  <div className="flex items-center justify-between rounded-lg bg-black/10 border border-white/10 px-2 py-2">
-                    <span className="text-white/55">Time</span>
-                    <span>{formatTime(t.createdAt)}</span>
-                  </div>
-
-                  <div className="flex items-center justify-between rounded-lg bg-black/10 border border-white/10 px-2 py-2">
-                    <span className="text-white/55">Stake</span>
-                    <span>
-                      {t.stake.toFixed(2)} {currency}
-                    </span>
-                  </div>
-
-                  <div className="flex items-center justify-between rounded-lg bg-black/10 border border-white/10 px-2 py-2">
-                    <span className="text-white/55">Payout</span>
-                    <span>{typeof t.payout === "number" ? `${t.payout.toFixed(2)} ${currency}` : "-"}</span>
-                  </div>
-
-                  <div className="flex items-center justify-between rounded-lg bg-black/10 border border-white/10 px-2 py-2">
-                    <span className="text-white/55">Profit</span>
-                    <span className={profitVal >= 0 ? "text-emerald-300" : "text-red-300"}>
-                      {t.result === "Pending" ? "-" : `${profitVal >= 0 ? "+" : ""}${profitVal.toFixed(2)} ${currency}`}
-                    </span>
-                  </div>
-
-                  <div className="col-span-2 flex items-center justify-between rounded-lg bg-black/10 border border-white/10 px-2 py-2">
-                    <span className="text-white/55">Status</span>
-                    <span className={t.result === "Win" ? "text-emerald-300" : t.result === "Loss" ? "text-red-300" : "text-yellow-300"}>
-                      {statusLabel}
-                    </span>
-                  </div>
+                {/* Time (optional – screenshot doesn’t emphasize it, but you still keep it) */}
+                <div className="mt-2 text-[10px] text-white/40">
+                  {formatTime(t.createdAt)}
                 </div>
               </div>
             );
