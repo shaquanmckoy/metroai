@@ -95,7 +95,52 @@ const DEFAULT_FLAGS: StrategyFlags = {
   matches: true,
   overunder: true,
 };
+const UI_FLAGS_KEY = "ui_flags";
 
+type UIFlags = {
+  metro_place_trade: boolean;
+  metro_edshell: boolean;
+  metro_3x: boolean;
+  metro_5x: boolean;
+  metro_1x_auto: boolean;
+  metro_fast_auto: boolean;
+  spider_analyzer: boolean;
+  spider_manual_over_under: boolean;
+  spider_random_auto: boolean;
+};
+
+const DEFAULT_UI_FLAGS: UIFlags = {
+  metro_place_trade: true,
+  metro_edshell: true,
+  metro_3x: true,
+  metro_5x: true,
+  metro_1x_auto: true,
+  metro_fast_auto: true,
+  spider_analyzer: true,
+  spider_manual_over_under: true,
+  spider_random_auto: true,
+};
+
+function readUIFlags(): UIFlags {
+  try {
+    const raw = localStorage.getItem(UI_FLAGS_KEY);
+    if (!raw) return DEFAULT_UI_FLAGS;
+    const v = JSON.parse(raw) as Partial<UIFlags>;
+    return {
+      metro_place_trade: typeof v.metro_place_trade === "boolean" ? v.metro_place_trade : true,
+      metro_edshell: typeof v.metro_edshell === "boolean" ? v.metro_edshell : true,
+      metro_3x: typeof v.metro_3x === "boolean" ? v.metro_3x : true,
+      metro_5x: typeof v.metro_5x === "boolean" ? v.metro_5x : true,
+      metro_1x_auto: typeof v.metro_1x_auto === "boolean" ? v.metro_1x_auto : true,
+      metro_fast_auto: typeof v.metro_fast_auto === "boolean" ? v.metro_fast_auto : true,
+      spider_analyzer: typeof v.spider_analyzer === "boolean" ? v.spider_analyzer : true,
+      spider_manual_over_under: typeof v.spider_manual_over_under === "boolean" ? v.spider_manual_over_under : true,
+      spider_random_auto: typeof v.spider_random_auto === "boolean" ? v.spider_random_auto : true,
+    };
+  } catch {
+    return DEFAULT_UI_FLAGS;
+  }
+}
 function readStrategyFlags(): StrategyFlags {
   try {
     const raw = localStorage.getItem(STRATEGY_FLAGS_KEY);
@@ -109,6 +154,7 @@ function readStrategyFlags(): StrategyFlags {
     return DEFAULT_FLAGS;
   }
 }
+const MIN_TRADE_INTERVAL_MS = 400;
 
 export default function Dashboard() {
   const router = useRouter();
@@ -133,29 +179,29 @@ export default function Dashboard() {
 const admin = role === "admin";
 setIsAdmin(admin);
 
-// ✅ ALWAYS load flags on login
 (async () => {
-  const local = localStorage.getItem("strategy_flags");
+  // ---- Strategy flags ----
+  try {
+    const res = await fetch("/api/admin/strategies", { cache: "no-store" });
+    const data = await res.json();
+    const f = data?.ok && data.flags ? data.flags : DEFAULT_FLAGS;
 
-  if (local) {
-    // we already have them
-    setStrategyFlags(readStrategyFlags());
-  } else {
-    // ❗ fetch from server if missing
-    try {
-      const res = await fetch("/api/admin/strategies", { cache: "no-store" });
-      const data = await res.json();
+    localStorage.setItem(STRATEGY_FLAGS_KEY, JSON.stringify(f));
+    setStrategyFlags(f);
+  } catch {
+    setStrategyFlags(DEFAULT_FLAGS);
+  }
 
-      if (data?.ok && data.flags) {
-        // save to localStorage for future use
-        localStorage.setItem("strategy_flags", JSON.stringify(data.flags));
-        setStrategyFlags(data.flags);
-      } else {
-        setStrategyFlags(DEFAULT_FLAGS);
-      }
-    } catch {
-      setStrategyFlags(DEFAULT_FLAGS);
-    }
+  // ---- UI flags ----
+  try {
+    const res = await fetch("/api/admin/ui-flags", { cache: "no-store" });
+    const data = await res.json();
+    const uf = data?.ok && data.flags ? data.flags : DEFAULT_UI_FLAGS;
+
+    localStorage.setItem(UI_FLAGS_KEY, JSON.stringify(uf));
+    setUiFlags(uf);
+  } catch {
+    setUiFlags(DEFAULT_UI_FLAGS);
   }
 
   setAuthChecked(true);
@@ -164,20 +210,25 @@ setIsAdmin(admin);
   }, [router]);
 
   // ✅ live-update if admin changes flags in another tab/page
-  useEffect(() => {
-    const onStorage = (e: StorageEvent) => {
-      if (e.key === STRATEGY_FLAGS_KEY) {
-        setStrategyFlags(readStrategyFlags());
-      }
-    };
-    window.addEventListener("storage", onStorage);
-    return () => window.removeEventListener("storage", onStorage);
-  }, []);
+useEffect(() => {
+  const onStorage = (e: StorageEvent) => {
+    if (e.key === STRATEGY_FLAGS_KEY) {
+      setStrategyFlags(readStrategyFlags());
+    }
+    if (e.key === UI_FLAGS_KEY) {
+      setUiFlags(readUIFlags());
+    }
+  };
+  window.addEventListener("storage", onStorage);
+  return () => window.removeEventListener("storage", onStorage);
+}, []);
 
   const wsRef = useRef<WebSocket | null>(null);
   const authorizedRef = useRef(false);
   const activeStrategyRef = useRef<"matches" | "overunder" | null>(null);
   const selectedPairRef = useRef<Pair>(PAIRS[0]);
+  const lastEdshellAtRef = useRef(0);
+  const [uiFlags, setUiFlags] = useState<UIFlags>(DEFAULT_UI_FLAGS);
 
   // ✅ force-remount MetroX panel (resets its local analysis state)
   const [metroXResetKey, setMetroXResetKey] = useState(0);
@@ -351,7 +402,7 @@ const runBuyWorker = async () => {
       }
 
       // Small gap between BUYs (Turbo-safe). If you still see issues, increase to 250.
-      await sleep(turboMode ? 150 : 80);
+      await sleep(400);
     }
   } finally {
     buyWorkerRunningRef.current = false;
@@ -657,6 +708,29 @@ pairDigitsRef.current[symbol] = next;
 
   /* ================= TRADE PLACEMENT ================= */
 
+  const placeTradeFor = async ({
+  symbol,
+  digit,
+  type,
+  durationTicks,
+  count = 1,
+}: {
+  symbol: Pair;
+  digit: number;
+  type: TradeType;
+  durationTicks: number;
+  count?: 1 | 3 | 5;
+}) => {
+  for (let i = 0; i < count; i++) {
+    const now = Date.now();
+    const wait = Math.max(0, MIN_TRADE_INTERVAL_MS - (now - lastEdshellAtRef.current));
+    if (wait) await sleep(wait);
+    lastEdshellAtRef.current = Date.now();
+
+    // currently Edshell is Differs-only, this line is fine
+    await placeDiffersInstant(symbol, digit, 1);
+  }
+};
   const placeTrade = (type: TradeType, durationTicks: number) => {
     if (selectedDigit === null) return alert("Select a digit first");
     if (!stake || stake <= 0) return alert("Enter a stake amount");
@@ -724,6 +798,7 @@ const placeDiffersInstant = async (symbol: Pair, digit: number, count: number) =
   stake,
   turbo: true,
 };
+
 
     safeSend({
       proposal: 1,
@@ -1313,34 +1388,22 @@ const toggleSpiderRandomAuto = async () => {
               <h2 className="font-semibold mb-4 text-white/85 tracking-tight">Trading Strategies</h2>
 
               {/* ✅ show/hide based on admin flags (NEW) */}
-              {isStrategyEnabledForViewer("matches") ? (
-                <StrategyRow
-                  title="MetroX"
-                  description="Matches/Differs strategy"
-                  active={activeStrategy === "matches"}
-                  onToggle={() => setActiveStrategy(activeStrategy === "matches" ? null : "matches")}
-                />
-              ) : (
-                !isAdmin && (
-                  <div className="mb-4 rounded-lg bg-black/20 border border-white/10 p-3 text-xs text-white/60">
-                    MetroX is currently disabled by admin.
-                  </div>
-                )
-              )}
+              {isStrategyEnabledForViewer("matches") && (
+  <StrategyRow
+    title="MetroX"
+    description="Matches/Differs strategy"
+    active={activeStrategy === "matches"}
+    onToggle={() => setActiveStrategy(activeStrategy === "matches" ? null : "matches")}
+  />
+)}
 
-              {isStrategyEnabledForViewer("overunder") ? (
+  {isStrategyEnabledForViewer("overunder") && (
   <StrategyRow
     title="SpiderX"
     description="Over/Under Strategy"
     active={activeStrategy === "overunder"}
     onToggle={() => setActiveStrategy(activeStrategy === "overunder" ? null : "overunder")}
   />
-) : (
-  !isAdmin && (
-    <div className="mb-1 rounded-lg bg-black/20 border border-white/10 p-3 text-xs text-white/60">
-      SpiderX is currently disabled by admin.
-    </div>
-  )
 )}
             </div>
           </div>
@@ -1367,6 +1430,7 @@ const toggleSpiderRandomAuto = async () => {
                 setMdTickDuration={setMdTickDuration}
                 onPlaceMetroX={() => placeTrade(mdTradeType, mdTickDuration)}
                 on3xSelectedDigit={place3xSelectedDigit}
+                placeTradeFor={placeTradeFor}
                 instant3xRunning={instant3xRunning}
                 turboMode={turboMode}
                 setTurboMode={setTurboMode}
@@ -1385,6 +1449,8 @@ onClearHistory={() => setTradeHistory([])}
                 auto1xRunning={auto1xRunning}
                 onToggleFastAuto={toggleFastAutoTrading}
                 fastAutoRunning={fastAutoRunning} 
+                uiFlags={uiFlags}
+                isAdmin={isAdmin}
               />
             )}
 
@@ -1408,11 +1474,13 @@ onClearHistory={() => setTradeHistory([])}
   toggleSpiderRandomAuto={toggleSpiderRandomAuto}
   spiderRandomRunning={spiderRandomRunning}
   setSelectedDigit={setSelectedDigit}
-
-  // ✅ ADD THESE:
   selectedDigit={selectedDigit}
   lastWinDigit={lastWinDigit}
   lastLossDigit={lastLossDigit}
+
+  // ✅ ADD THESE TWO LINES (this fixes your error)
+  uiFlags={uiFlags}
+  isAdmin={isAdmin}
 />
   </div>
 )}
@@ -1476,6 +1544,7 @@ function StrategyRow({
 /* ================= MetroX PANEL ================= */
 
 function MetroXPanel({
+  
   ticks,
   pipSize,
   stake,
@@ -1490,6 +1559,7 @@ function MetroXPanel({
   setMdTickDuration,
   onPlaceMetroX,
   on3xSelectedDigit,
+  placeTradeFor,
   instant3xRunning,
   turboMode,
   setTurboMode,
@@ -1508,9 +1578,12 @@ function MetroXPanel({
   auto1xRunning,
   onToggleFastAuto,
   fastAutoRunning,
+  uiFlags,
+  isAdmin,
 }: {
   ticks: number[];
   pipSize: number;
+
 
   stake: number;
   setStake: (n: number) => void;
@@ -1529,6 +1602,7 @@ function MetroXPanel({
 
   onPlaceMetroX: () => void;
   on3xSelectedDigit: () => void;
+    placeTradeFor: any;
   instant3xRunning: boolean;
 
   turboMode: boolean;
@@ -1557,6 +1631,8 @@ function MetroXPanel({
   auto1xRunning: boolean;
   onToggleFastAuto: () => void;
   fastAutoRunning: boolean;
+    uiFlags: UIFlags;
+  isAdmin: boolean;
     // ✅ NEW SpiderX Random Auto
  
 }) {
@@ -1565,6 +1641,12 @@ function MetroXPanel({
     if (!ticks.length) return 0;
     return (ticks.filter((x) => x === d).length / ticks.length) * 100;
   };
+  const [edshellCount, setEdshellCount] = useState<1 | 3 | 5>(1);
+const [edshellScope, setEdshellScope] = useState<"current" | "scan">("current");
+const [metroXPressed, setMetroXPressed] = useState(false);
+const [edshellPlacing, setEdshellPlacing] = useState(false);
+const [edshellPlaced, setEdshellPlaced] = useState(false);
+const canShow = (key: keyof UIFlags) => isAdmin || uiFlags[key] !== false;
 
   // ✅ “high appearance” threshold (avg ~10%)
   const HIGH_PCT_THRESHOLD = 13.0;
@@ -1632,6 +1714,7 @@ function MetroXPanel({
   value={selectedPair}
   onChange={(e) => setSelectedPair(e.target.value as Pair)}
 >
+
   <optgroup label="Volatility Indices">
     {INDEX_GROUPS.volatility.map((s) => (
       <option key={s.code} value={s.code}>
@@ -1899,81 +1982,169 @@ function MetroXPanel({
       </div>
 
       {/* ACTION BUTTONS */}
-      <div className="mt-5 space-y-6">
-        <button
-          onClick={() => {
-            if (selectedDigit === null) return alert("Select a digit first");
-            onPlaceMetroX();
-          }}
-          className="w-full rounded-md py-4 bg-emerald-600 hover:bg-emerald-700 text-sm font-semibold shadow-[0_0_0_1px_rgba(255,255,255,0.10)] active:scale-[0.98] active:brightness-110 transition"
+<div className="mt-5 space-y-6">
+  {/* ✅ Place MetroX Trade */}
+  {canShow("metro_place_trade") && (
+    <button
+      onClick={() => {
+        if (selectedDigit === null) return alert("Select a digit first");
+
+        setMetroXPressed(true);
+        setTimeout(() => setMetroXPressed(false), 1000);
+
+        onPlaceMetroX();
+      }}
+      className={`w-full rounded-md py-4 text-sm font-semibold shadow-[0_0_0_1px_rgba(255,255,255,0.10)] transition active:scale-[0.98]
+        ${
+          metroXPressed
+            ? "bg-emerald-500 ring-2 ring-emerald-300 shadow-[0_0_25px_rgba(16,185,129,0.6)]"
+            : "bg-emerald-600 hover:bg-emerald-700 active:brightness-110"
+        }`}
+    >
+      {metroXPressed ? "✅ Placing Trade" : "⚡ Place MetroX Trade"}
+    </button>
+  )}
+
+  {/* ✅ EDSHELL */}
+  {canShow("metro_edshell") && (
+    <div className="space-y-2">
+      <button
+        disabled={edshellPlacing}
+        onClick={async () => {
+          if (edshellPlacing) return;
+
+          setEdshellPlacing(true);
+
+          await placeTradeFor({
+            symbol: selectedPair,
+            digit: pairMeta[selectedPair]?.lowDigit ?? 0,
+            type: "Differs",
+            durationTicks: mdTickDuration,
+            count: edshellCount,
+          });
+
+          setEdshellPlacing(false);
+          setEdshellPlaced(true);
+
+          setTimeout(() => {
+            setEdshellPlaced(false);
+          }, 1500);
+        }}
+        className={`w-full rounded-md py-4 text-lg font-bold transition ${
+          edshellPlacing
+            ? "bg-red-600 animate-pulse"
+            : edshellPlaced
+            ? "bg-green-600"
+            : "bg-yellow-500 hover:bg-yellow-600"
+        }`}
+      >
+        {edshellPlacing ? "🧠 PLACING..." : edshellPlaced ? "✅ DONE" : "🧠 EDSHELL"}
+      </button>
+
+      <div className="grid grid-cols-2 gap-2">
+        <select
+          value={edshellCount}
+          onChange={(e) => setEdshellCount(Number(e.target.value) as 1 | 3 | 5)}
+          className="w-full bg-[#0e1422] border border-white/10 p-2 rounded-md text-sm"
         >
-          ⚡ Place MetroX Trade
-        </button>
+          <option value={1}>1x (default)</option>
+          <option value={3}>3x</option>
+          <option value={5}>5x</option>
+        </select>
 
-        <button
-          onClick={on3xSelectedDigit}
-          disabled={instant3xRunning}
-          className={`w-full rounded-md py-3 text-sm font-semibold shadow-[0_0_0_1px_rgba(255,255,255,0.10)] transition active:scale-[0.98] ${
-  instant3xRunning
-    ? "bg-slate-600 cursor-not-allowed animate-pulse"
-    : "bg-red-600 hover:bg-red-700 active:brightness-110"
-}`}
+        <select
+          value={edshellScope}
+          onChange={(e) => setEdshellScope(e.target.value as "current" | "scan")}
+          className="w-full bg-[#0e1422] border border-white/10 p-2 rounded-md text-sm"
         >
-          {instant3xRunning ? "Placing 3 trades..." : "3x Selected Digit"}
-        </button>
-
-        <button
-          onClick={onToggle5x}
-          className={`w-full rounded-md py-3 text-sm font-semibold shadow-[0_0_0_1px_rgba(255,255,255,0.10)] transition active:scale-[0.98] ${
-  auto5xRunning
-    ? "bg-orange-600 hover:bg-orange-700 animate-pulse"
-    : "bg-purple-600 hover:bg-purple-700 active:brightness-110"
-}`}
-        >
-          {auto5xRunning ? "Stop 5x AutoTrading" : "5x AutoTrading"}
-        </button>
-        <button
-  onClick={run1xAutoAllPairs}
-  disabled={auto1xRunning}
-  className={`w-full rounded-md py-3 text-sm font-semibold shadow-[0_0_0_1px_rgba(255,255,255,0.10)] transition active:scale-[0.98] ${
-    auto1xRunning
-      ? "bg-slate-600 cursor-not-allowed animate-pulse"
-      : "bg-indigo-600 hover:bg-indigo-700 active:brightness-110"
-  }`}
->
-  {auto1xRunning ? "Scanning..." : "1x Auto All Pairs"}
-</button>
-
-<button
-  onClick={onToggleFastAuto}
-  className={`w-full rounded-md py-3 text-sm font-semibold shadow-[0_0_0_1px_rgba(255,255,255,0.10)] transition active:scale-[0.98] ${
-    fastAutoRunning
-      ? "bg-emerald-600 hover:bg-emerald-700 animate-pulse active:brightness-110"
-      : "bg-cyan-600 hover:bg-cyan-700 active:brightness-110"
-  }`}
->
-  {fastAutoRunning ? "Stop Fast AutoTrading" : "Fast AutoTrading"}
-</button>
-<div className="flex items-center justify-between px-2 text-xs text-white/70">
-  <span>Turbo Mode</span>
-  <button
-    onClick={() => setTurboMode(!turboMode)}
-    className={`w-12 h-6 rounded-full relative border transition ${
-      turboMode ? "bg-orange-500/70 border-orange-400/60" : "bg-white/10 border-white/15"
-    }`}
-  >
-    <span
-      className={`absolute top-0.5 w-5 h-5 bg-white rounded-full transition ${
-        turboMode ? "right-0.5" : "left-0.5"
-      }`}
-    />
-  </button>
-</div>
-
-        {analysisStatus && (
-          <div className="rounded-lg bg-white/5 border border-white/10 p-3 text-xs text-white/70">{analysisStatus}</div>
-        )}
+          <option value="current">Current Index</option>
+          <option value="scan">Scan All</option>
+        </select>
       </div>
+    </div>
+  )}
+
+  {/* ✅ 3x Selected Digit */}
+  {canShow("metro_3x") && (
+    <button
+      onClick={on3xSelectedDigit}
+      disabled={instant3xRunning}
+      className={`w-full rounded-md py-3 text-sm font-semibold shadow-[0_0_0_1px_rgba(255,255,255,0.10)] transition active:scale-[0.98] ${
+        instant3xRunning
+          ? "bg-slate-600 cursor-not-allowed animate-pulse"
+          : "bg-red-600 hover:bg-red-700 active:brightness-110"
+      }`}
+    >
+      {instant3xRunning ? "Placing 3 trades..." : "3x Selected Digit"}
+    </button>
+  )}
+
+  {/* ✅ 5x AutoTrading */}
+  {canShow("metro_5x") && (
+    <button
+      onClick={onToggle5x}
+      className={`w-full rounded-md py-3 text-sm font-semibold shadow-[0_0_0_1px_rgba(255,255,255,0.10)] transition active:scale-[0.98] ${
+        auto5xRunning
+          ? "bg-orange-600 hover:bg-orange-700 animate-pulse"
+          : "bg-purple-600 hover:bg-purple-700 active:brightness-110"
+      }`}
+    >
+      {auto5xRunning ? "Stop 5x AutoTrading" : "5x AutoTrading"}
+    </button>
+  )}
+
+  {/* ✅ 1x Auto All Pairs */}
+  {canShow("metro_1x_auto") && (
+    <button
+      onClick={run1xAutoAllPairs}
+      disabled={auto1xRunning}
+      className={`w-full rounded-md py-3 text-sm font-semibold shadow-[0_0_0_1px_rgba(255,255,255,0.10)] transition active:scale-[0.98] ${
+        auto1xRunning
+          ? "bg-slate-600 cursor-not-allowed animate-pulse"
+          : "bg-indigo-600 hover:bg-indigo-700 active:brightness-110"
+      }`}
+    >
+      {auto1xRunning ? "Scanning..." : "1x Auto All Pairs"}
+    </button>
+  )}
+
+  {/* ✅ Fast AutoTrading */}
+  {canShow("metro_fast_auto") && (
+    <button
+      onClick={onToggleFastAuto}
+      className={`w-full rounded-md py-3 text-sm font-semibold shadow-[0_0_0_1px_rgba(255,255,255,0.10)] transition active:scale-[0.98] ${
+        fastAutoRunning
+          ? "bg-emerald-600 hover:bg-emerald-700 animate-pulse active:brightness-110"
+          : "bg-cyan-600 hover:bg-cyan-700 active:brightness-110"
+      }`}
+    >
+      {fastAutoRunning ? "Stop Fast AutoTrading" : "Fast AutoTrading"}
+    </button>
+  )}
+
+  {/* Turbo Mode (leave visible for admins/users — or wrap in canShow if you want) */}
+  <div className="flex items-center justify-between px-2 text-xs text-white/70">
+    <span>Turbo Mode</span>
+    <button
+      onClick={() => setTurboMode(!turboMode)}
+      className={`w-12 h-6 rounded-full relative border transition ${
+        turboMode ? "bg-orange-500/70 border-orange-400/60" : "bg-white/10 border-white/15"
+      }`}
+    >
+      <span
+        className={`absolute top-0.5 w-5 h-5 bg-white rounded-full transition ${
+          turboMode ? "right-0.5" : "left-0.5"
+        }`}
+      />
+    </button>
+  </div>
+
+  {analysisStatus && (
+    <div className="rounded-lg bg-white/5 border border-white/10 p-3 text-xs text-white/70">
+      {analysisStatus}
+    </div>
+  )}
+</div>
 
       {/* Trade History */}
       <TradeHistoryMetroLike tradeHistory={tradeHistory} currency={currency} onClear={onClearHistory} />
@@ -2271,13 +2442,17 @@ function SpiderXAnalyzer({
   currency,
   onClearHistory,
   setStake,
-  stake, // ✅ ADD THIS
+  stake,
   toggleSpiderRandomAuto,
   spiderRandomRunning,
   setSelectedDigit,
   selectedDigit,
   lastWinDigit,
   lastLossDigit,
+
+  // ✅ NEW (for admin UI flags)
+  uiFlags,
+  isAdmin,
 }: {
   pairs: readonly Pair[];
   indexGroups: typeof INDEX_GROUPS;
@@ -2289,37 +2464,46 @@ function SpiderXAnalyzer({
   currency: string;
   onClearHistory: () => void;
   setStake: (n: number) => void;
-  stake: number; // ✅ ADD THIS TYPE
+  stake: number;
   toggleSpiderRandomAuto: () => void;
   spiderRandomRunning: boolean;
   setSelectedDigit: (d: number | null) => void;
   selectedDigit: number | null;
   lastWinDigit: number | null;
   lastLossDigit: number | null;
+
+  // ✅ NEW TYPES
+  uiFlags: UIFlags;
+  isAdmin: boolean;
 }) {
-    // ===== Live Digit Stream (SpiderX) =====
+  // ✅ helper (same as MetroX)
+  const canShow = (key: keyof UIFlags) => isAdmin || uiFlags[key] !== false;
+
+  // ===== Live Digit Stream (SpiderX) =====
   const ticks = pairDigitsRef.current[selectedPair] ?? [];
-
   const lastDigit = ticks.length ? ticks[ticks.length - 1] : null;
-  // ✅ Use last20 like MetroX for a clean signal
-const last20 = ticks.slice(-20);
 
-const mostFrequentDigit = useMemo(() => {
-  if (last20.length < 1) return null;
-  const freq = Array.from({ length: 10 }, () => 0);
-  for (const d of last20) freq[d]++;
-  const max = Math.max(...freq);
-  return freq.indexOf(max); // first most frequent
-}, [last20]);
+  // ✅ Use last20 like MetroX for a clean signal
+  const last20 = ticks.slice(-20);
+
+  const mostFrequentDigit = useMemo(() => {
+    if (last20.length < 1) return null;
+    const freq = Array.from({ length: 10 }, () => 0);
+    for (const d of last20) freq[d]++;
+    const max = Math.max(...freq);
+    return freq.indexOf(max); // first most frequent
+  }, [last20]);
 
   const digitPercent = (d: number) => {
     if (!ticks.length) return 0;
     return (ticks.filter((x) => x === d).length / ticks.length) * 100;
   };
+
   const [mode, setMode] = useState<AnalyzerMode>("OVER_1");
+
   // ===== Digit Popup (NEW) =====
-const [digitPopupOpen, setDigitPopupOpen] = useState(false);
-const [popupDigit, setPopupDigit] = useState<number | null>(null);
+  const [digitPopupOpen, setDigitPopupOpen] = useState(false);
+  const [popupDigit, setPopupDigit] = useState<number | null>(null);
 
   // ✅ manual barrier digit (independent)
   const [barrierDigit, setBarrierDigit] = useState<number>(1);
@@ -2415,12 +2599,9 @@ const [popupDigit, setPopupDigit] = useState<number | null>(null);
 
         // ✅ IMPORTANT: set pair + digit before placing trade
         setSelectedPair(s.pair);
-        // @ts-ignore (Dashboard owns selectedDigit; this is still safe if you pass setSelectedDigit in future)
-        // If you DO have setSelectedDigit available, use it here instead of this comment.
+        setSelectedDigit(tradeDigit); // ✅ FIX: actually sets digit used by Dashboard placeTrade
 
         setTimeout(() => {
-          // NOTE: Dashboard placeTrade uses selectedDigit.
-          // If you want Auto to truly use tradeDigit, pass setSelectedDigit into SpiderXAnalyzer.
           onPlaceTrade(tradeType, 1);
         }, 50);
 
@@ -2444,293 +2625,275 @@ const [popupDigit, setPopupDigit] = useState<number | null>(null);
 
   return (
     <div className="space-y-6">
-
-        {/* ================= Analyzer ================= */}
-      <div className="rounded-2xl border border-white/10 bg-gradient-to-br from-[#1b2235]/95 to-[#121826]/95 p-5">
-        {/* Header */}
-        <div className="flex items-center justify-between mb-3">
-          <p className="font-semibold text-white/90">🎯 SpiderX Best Pairs Analyzer</p>
-          <button
-            onClick={startAnalysis}
-            className={`px-4 py-2 rounded-md text-sm font-semibold border ${
-              running ? "bg-red-600 hover:bg-red-700 border-white/10" : "bg-sky-600 hover:bg-sky-700 border-white/10"
-            }`}
-          >
-            {running ? "Stop Analysis" : "Start Analysis"}
-          </button>
-        </div>
-
-        {/* Mode tabs */}
-        <div className="flex flex-wrap gap-2 mb-4">
-          {modes.map((m) => (
+      {/* ================= Analyzer ================= */}
+      {canShow("spider_analyzer") && (
+        <div className="rounded-2xl border border-white/10 bg-gradient-to-br from-[#1b2235]/95 to-[#121826]/95 p-5">
+          {/* Header */}
+          <div className="flex items-center justify-between mb-3">
+            <p className="font-semibold text-white/90">🎯 SpiderX Best Pairs Analyzer</p>
             <button
-              key={m.key}
-              onClick={() => setMode(m.key)}
-              className={`px-3 py-1 rounded-md text-xs border ${
-                mode === m.key ? "bg-sky-600/25 border-sky-500/30 text-white" : "bg-white/5 border-white/10 text-white/70"
+              onClick={startAnalysis}
+              className={`px-4 py-2 rounded-md text-sm font-semibold border ${
+                running ? "bg-red-600 hover:bg-red-700 border-white/10" : "bg-sky-600 hover:bg-sky-700 border-white/10"
               }`}
             >
-              {m.label}
+              {running ? "Stop Analysis" : "Start Analysis"}
             </button>
-          ))}
-        </div>
-
-        {/* Countdown */}
-        <div className="rounded-xl border border-white/10 bg-black/20 p-3 mb-4">
-          <div className="flex justify-between text-xs text-white/70 mb-1">
-            <span>TIME</span>
-            <span>{running ? `${secondsLeft}s` : "—"}</span>
           </div>
 
-          <div className="h-2 rounded-full bg-white/10 overflow-hidden">
-            <div
-              className="h-full bg-sky-500/80 transition-all"
-              style={{ width: running ? `${((30 - secondsLeft) / 30) * 100}%` : "0%" }}
-            />
+          {/* Mode tabs */}
+          <div className="flex flex-wrap gap-2 mb-4">
+            {modes.map((m) => (
+              <button
+                key={m.key}
+                onClick={() => setMode(m.key)}
+                className={`px-3 py-1 rounded-md text-xs border ${
+                  mode === m.key ? "bg-sky-600/25 border-sky-500/30 text-white" : "bg-white/5 border-white/10 text-white/70"
+                }`}
+              >
+                {m.label}
+              </button>
+            ))}
           </div>
 
-          {running && analyzingPairs.length > 0 && (
-            <div className="mt-3 flex flex-wrap gap-2">
-              {analyzingPairs.map((p) => (
-                <span key={p} className="px-2 py-1 rounded-md text-xs bg-white/5 border border-white/10 text-white/70">
-                  {p}
-                </span>
-              ))}
+          {/* Countdown */}
+          <div className="rounded-xl border border-white/10 bg-black/20 p-3 mb-4">
+            <div className="flex justify-between text-xs text-white/70 mb-1">
+              <span>TIME</span>
+              <span>{running ? `${secondsLeft}s` : "—"}</span>
+            </div>
+
+            <div className="h-2 rounded-full bg-white/10 overflow-hidden">
+              <div
+                className="h-full bg-sky-500/80 transition-all"
+                style={{ width: running ? `${((30 - secondsLeft) / 30) * 100}%` : "0%" }}
+              />
+            </div>
+
+            {running && analyzingPairs.length > 0 && (
+              <div className="mt-3 flex flex-wrap gap-2">
+                {analyzingPairs.map((p) => (
+                  <span key={p} className="px-2 py-1 rounded-md text-xs bg-white/5 border border-white/10 text-white/70">
+                    {p}
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Results */}
+          {results.length > 0 && (
+            <div className="space-y-3">
+              {results.map((r, i) => {
+                const last20 = (pairDigitsRef.current[r.pair] ?? []).slice(-20);
+
+                const label =
+                  indexGroups.volatility.find((x) => x.code === r.pair)?.label ||
+                  indexGroups.jump.find((x) => x.code === r.pair)?.label ||
+                  r.pair;
+
+                return (
+                  <div
+                    key={r.pair}
+                    className={`rounded-xl border border-white/10 bg-black/20 p-3 ${r.pair === selectedPair ? "ring-2 ring-sky-500/40" : ""}`}
+                  >
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <p className="text-sm font-semibold text-white/90">
+                          #{i + 1} {label}
+                        </p>
+                        <button onClick={() => setSelectedPair(r.pair)} className="text-xs text-emerald-300">
+                          ← Click to select
+                        </button>
+                      </div>
+
+                      <div className="text-right">
+                        <p className="text-lg font-extrabold text-emerald-300">{r.pct.toFixed(1)}%</p>
+                        <p className="text-[11px] text-white/55">{r.hits}/20 digits</p>
+                      </div>
+                    </div>
+
+                    <div className="mt-3 flex flex-wrap gap-1">
+                      {last20.map((d, idx) => (
+                        <span
+                          key={idx}
+                          className="w-6 h-6 rounded-md bg-emerald-500/15 border border-emerald-400/20 text-emerald-100 text-xs flex items-center justify-center"
+                        >
+                          {d}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {/* Auto Trading button (optional) */}
+          {results.length > 0 && (
+            <div className="mt-4 space-y-3">
+              <button
+                onClick={() => {
+                  if (autoRunning) {
+                    setAutoRunning(false);
+                    tradedPairsRef.current.clear();
+                    return;
+                  }
+                  const bad = results.find((r) => r.pct < 95);
+                  if (bad) {
+                    alert(`Auto canceled: ${bad.pair} is only ${bad.pct.toFixed(1)}%`);
+                    return;
+                  }
+                  setAutoRunning(true);
+                  tradedPairsRef.current.clear();
+                }}
+                className={`w-full py-3 rounded-md font-semibold text-sm border transition ${
+                  autoRunning ? "bg-red-600 hover:bg-red-700 animate-pulse" : "bg-emerald-600 hover:bg-emerald-700 border-emerald-500/40"
+                }`}
+              >
+                {autoRunning ? "Stop Auto Trading" : "⚡ Start Auto Trading"}
+              </button>
+
+              <p className="text-xs text-white/60 text-center">
+                Auto-trades {mode.replace("_", " ")} (1 tick) when percentage ≥ 95%
+              </p>
             </div>
           )}
         </div>
+      )}
 
-        {/* Results */}
-        {results.length > 0 && (
-          <div className="space-y-3">
-            {results.map((r, i) => {
-              const last20 = (pairDigitsRef.current[r.pair] ?? []).slice(-20);
-
-              const label =
-                indexGroups.volatility.find((x) => x.code === r.pair)?.label ||
-                indexGroups.jump.find((x) => x.code === r.pair)?.label ||
-                r.pair;
-
-              return (
-                <div
-                  key={r.pair}
-                  className={`rounded-xl border border-white/10 bg-black/20 p-3 ${r.pair === selectedPair ? "ring-2 ring-sky-500/40" : ""}`}
-                >
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <p className="text-sm font-semibold text-white/90">
-                        #{i + 1} {label}
-                      </p>
-                      <button onClick={() => setSelectedPair(r.pair)} className="text-xs text-emerald-300">
-                        ← Click to select
-                      </button>
-                    </div>
-
-                    <div className="text-right">
-                      <p className="text-lg font-extrabold text-emerald-300">{r.pct.toFixed(1)}%</p>
-                      <p className="text-[11px] text-white/55">{r.hits}/20 digits</p>
-                    </div>
-                  </div>
-
-                  <div className="mt-3 flex flex-wrap gap-1">
-                    {last20.map((d, idx) => (
-                      <span
-                        key={idx}
-                        className="w-6 h-6 rounded-md bg-emerald-500/15 border border-emerald-400/20 text-emerald-100 text-xs flex items-center justify-center"
-                      >
-                        {d}
-                      </span>
-                    ))}
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        )}
-
-        {/* Auto Trading button (optional) */}
-        {results.length > 0 && (
-          <div className="mt-4 space-y-3">
-            <button
-              onClick={() => {
-                if (autoRunning) {
-                  setAutoRunning(false);
-                  tradedPairsRef.current.clear();
-                  return;
-                }
-                const bad = results.find((r) => r.pct < 95);
-                if (bad) {
-                  alert(`Auto canceled: ${bad.pair} is only ${bad.pct.toFixed(1)}%`);
-                  return;
-                }
-                setAutoRunning(true);
-                tradedPairsRef.current.clear();
-              }}
-              className={`w-full py-3 rounded-md font-semibold text-sm border transition ${
-                autoRunning ? "bg-red-600 hover:bg-red-700 animate-pulse" : "bg-emerald-600 hover:bg-emerald-700 border-emerald-500/40"
-              }`}
-            >
-              {autoRunning ? "Stop Auto Trading" : "⚡ Start Auto Trading"}
-            </button>
-
-            <p className="text-xs text-white/60 text-center">
-              Auto-trades {mode.replace("_", " ")} (1 tick) when percentage ≥ 95%
-            </p>
-          </div>
-        )}
-
-              </div>
       {/* ================= Digit Trade Popup (SpiderX) ================= */}
-{digitPopupOpen && popupDigit !== null && (
-  <div className="fixed inset-0 z-50 flex items-center justify-center">
-    {/* Backdrop */}
-    <button
-      className="absolute inset-0 bg-black/60"
-      onClick={() => setDigitPopupOpen(false)}
-    />
+      {digitPopupOpen && popupDigit !== null && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center">
+          {/* Backdrop */}
+          <button className="absolute inset-0 bg-black/60" onClick={() => setDigitPopupOpen(false)} />
 
-    {/* Modal */}
-    <div className="relative w-[340px] max-w-[92vw] rounded-2xl border border-white/10 bg-[#0f1b2d] p-5 shadow-2xl">
-      <div className="grid grid-cols-2 gap-4">
-        {/* Top buttons: 1 trade */}
-        <button
-          onClick={() => {
-  setSelectedDigit(popupDigit);   // ✅ ensure Dashboard has the digit
-  onPlaceTrade("Over", 1);
-  setDigitPopupOpen(false);
-}}
-          className="rounded-2xl bg-emerald-600 hover:bg-emerald-700 py-10 font-extrabold text-white text-xl"
-        >
-          OVER {popupDigit}
-        </button>
+          {/* Modal */}
+          <div className="relative w-[340px] max-w-[92vw] rounded-2xl border border-white/10 bg-[#0f1b2d] p-5 shadow-2xl">
+            <div className="grid grid-cols-2 gap-4">
+              {/* Top buttons: 1 trade */}
+              <button
+                onClick={() => {
+                  setSelectedDigit(popupDigit);
+                  onPlaceTrade("Over", 1);
+                  setDigitPopupOpen(false);
+                }}
+                className="rounded-2xl bg-emerald-600 hover:bg-emerald-700 py-10 font-extrabold text-white text-xl"
+              >
+                OVER {popupDigit}
+              </button>
 
-        <button
-          onClick={() => {
-  setSelectedDigit(popupDigit);
-  onPlaceTrade("Under", 1);
-  setDigitPopupOpen(false);
-}}
-          className="rounded-2xl bg-blue-600 hover:bg-blue-700 py-10 font-extrabold text-white text-xl"
-        >
-          UNDER {popupDigit}
-        </button>
-      </div>
+              <button
+                onClick={() => {
+                  setSelectedDigit(popupDigit);
+                  onPlaceTrade("Under", 1);
+                  setDigitPopupOpen(false);
+                }}
+                className="rounded-2xl bg-blue-600 hover:bg-blue-700 py-10 font-extrabold text-white text-xl"
+              >
+                UNDER {popupDigit}
+              </button>
+            </div>
 
-      <div className="mt-4 text-center text-sm font-semibold text-white/60">
-        ADMIN: Instant Over/Under (3 Trades)
-      </div>
+            <div className="mt-4 text-center text-sm font-semibold text-white/60">ADMIN: Instant Over/Under (3 Trades)</div>
 
-      <div className="mt-4 grid grid-cols-2 gap-4">
-        {/* Bottom buttons: 3x trades */}
-        <button
-          onClick={() => {
-  setSelectedDigit(popupDigit);
+            <div className="mt-4 grid grid-cols-2 gap-4">
+              {/* Bottom buttons: 3x trades */}
+              <button
+                onClick={() => {
+                  setSelectedDigit(popupDigit);
 
-  onPlaceTrade("Over", 1);
-  setTimeout(() => onPlaceTrade("Over", 1), 400);
-  setTimeout(() => onPlaceTrade("Over", 1), 800);
+                  onPlaceTrade("Over", 1);
+                  setTimeout(() => onPlaceTrade("Over", 1), 400);
+                  setTimeout(() => onPlaceTrade("Over", 1), 800);
 
-  setDigitPopupOpen(false);
-}}
-          className="rounded-2xl bg-orange-500 hover:bg-orange-600 py-8 font-bold text-white"
-        >
-          ⚡ Instant Over {popupDigit}
-          <div className="text-white/90 text-sm mt-2">(3x trades)</div>
-        </button>
+                  setDigitPopupOpen(false);
+                }}
+                className="rounded-2xl bg-orange-500 hover:bg-orange-600 py-8 font-bold text-white"
+              >
+                ⚡ Instant Over {popupDigit}
+                <div className="text-white/90 text-sm mt-2">(3x trades)</div>
+              </button>
 
-        <button
-          onClick={() => {
-  setSelectedDigit(popupDigit);
+              <button
+                onClick={() => {
+                  setSelectedDigit(popupDigit);
 
-  onPlaceTrade("Under", 1);
-  setTimeout(() => onPlaceTrade("Under", 1), 400);
-  setTimeout(() => onPlaceTrade("Under", 1), 800);
+                  onPlaceTrade("Under", 1);
+                  setTimeout(() => onPlaceTrade("Under", 1), 400);
+                  setTimeout(() => onPlaceTrade("Under", 1), 800);
 
-  setDigitPopupOpen(false);
-}}
-          className="rounded-2xl bg-purple-600 hover:bg-purple-700 py-8 font-bold text-white"
-        >
-          ⚡ Instant Under {popupDigit}
-          <div className="text-white/90 text-sm mt-2">(3x trades)</div>
-        </button>
-      </div>
+                  setDigitPopupOpen(false);
+                }}
+                className="rounded-2xl bg-purple-600 hover:bg-purple-700 py-8 font-bold text-white"
+              >
+                ⚡ Instant Under {popupDigit}
+                <div className="text-white/90 text-sm mt-2">(3x trades)</div>
+              </button>
+            </div>
 
-      <button
-        onClick={() => setDigitPopupOpen(false)}
-        className="mt-5 w-full rounded-xl bg-white/10 hover:bg-white/15 border border-white/10 py-3 font-semibold text-white/80"
-      >
-        Cancel
-      </button>
-    </div>
-  </div>
-)}
+            <button
+              onClick={() => setDigitPopupOpen(false)}
+              className="mt-5 w-full rounded-xl bg-white/10 hover:bg-white/15 border border-white/10 py-3 font-semibold text-white/80"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* ================= Live Digit Stream (SpiderX) ================= */}
-<div className="rounded-2xl border border-white/10 bg-gradient-to-br from-[#1b2235]/95 to-[#121826]/95 p-4">
-  <p className="text-sm text-white/80 mb-3">Live Digit Stream</p>
+      <div className="rounded-2xl border border-white/10 bg-gradient-to-br from-[#1b2235]/95 to-[#121826]/95 p-4">
+        <p className="text-sm text-white/80 mb-3">Live Digit Stream</p>
 
-  <div className="grid grid-cols-5 gap-3 mb-3">
-  {Array.from({ length: 10 }, (_, d) => {
-  const pct = digitPercent(d);
+        <div className="grid grid-cols-5 gap-3 mb-3">
+          {Array.from({ length: 10 }, (_, d) => {
+            const pct = digitPercent(d);
 
-  const selected = selectedDigit === d;     // ✅ manual selected
-  const won = lastWinDigit === d;           // ✅ win flash
-  const lost = lastLossDigit === d;         // ✅ loss flash
-  const live = lastDigit === d;             // ✅ market last digit
-  const most = mostFrequentDigit === d;     // ✅ most frequent in red
+            const selected = selectedDigit === d;
+            const won = lastWinDigit === d;
+            const lost = lastLossDigit === d;
+            const live = lastDigit === d;
+            const most = mostFrequentDigit === d;
 
-  // same style set as MetroX
-  const base = "bg-[#0e1422] border-white/10 text-white/90 hover:bg-white/5";
-  const selectedCls = "bg-blue-600/90 border-blue-400 text-white";
-  const wonCls = "bg-emerald-600/35 border-emerald-400 text-white";
-  const lostCls = "bg-red-600/35 border-red-400 text-white";
-  const liveCls = "bg-emerald-600/20 border-emerald-500/30 text-white";
-  const mostCls = "bg-red-600/20 border-red-500/35 text-white";
+            const base = "bg-[#0e1422] border-white/10 text-white/90 hover:bg-white/5";
+            const selectedCls = "bg-blue-600/90 border-blue-400 text-white";
+            const wonCls = "bg-emerald-600/35 border-emerald-400 text-white";
+            const lostCls = "bg-red-600/35 border-red-400 text-white";
+            const liveCls = "bg-emerald-600/20 border-emerald-500/30 text-white";
+            const mostCls = "bg-red-600/20 border-red-500/35 text-white";
 
-  // ✅ Priority (same idea as MetroX)
-  const cls = selected
-    ? selectedCls
-    : won
-    ? wonCls
-    : lost
-    ? lostCls
-    : live
-    ? liveCls
-    : most
-    ? mostCls
-    : base;
+            const cls = selected ? selectedCls : won ? wonCls : lost ? lostCls : live ? liveCls : most ? mostCls : base;
 
-  return (
-    <button
-      key={d}
-      onClick={() => {
-        setSelectedDigit(d);
-        setPopupDigit(d);
-        setDigitPopupOpen(true);
-      }}
-      className={`relative rounded-full py-3 text-center border transition ${cls}`}
-    >
-      {/* ✅ Icons like MetroX */}
-      {selected && <span className="absolute top-2 right-3 text-white text-sm">✓</span>}
-      {!selected && won && <span className="absolute top-2 right-3 text-emerald-100 text-sm">💰</span>}
-      {!selected && !won && lost && <span className="absolute top-2 right-3 text-red-100 text-sm">❌</span>}
-      {!selected && !won && !lost && live && <span className="absolute top-2 right-3 text-emerald-200 text-sm">●</span>}
-      {!selected && !won && !lost && !live && most && <span className="absolute top-2 right-3 text-red-200 text-sm">▲</span>}
+            return (
+              <button
+                key={d}
+                onClick={() => {
+                  setSelectedDigit(d);
+                  setPopupDigit(d);
+                  setDigitPopupOpen(true);
+                }}
+                className={`relative rounded-full py-3 text-center border transition ${cls}`}
+              >
+                {selected && <span className="absolute top-2 right-3 text-white text-sm">✓</span>}
+                {!selected && won && <span className="absolute top-2 right-3 text-emerald-100 text-sm">💰</span>}
+                {!selected && !won && lost && <span className="absolute top-2 right-3 text-red-100 text-sm">❌</span>}
+                {!selected && !won && !lost && live && <span className="absolute top-2 right-3 text-emerald-200 text-sm">●</span>}
+                {!selected && !won && !lost && !live && most && <span className="absolute top-2 right-3 text-red-200 text-sm">▲</span>}
 
-      <div className="text-lg font-bold leading-none">{d}</div>
-      <div className="mt-1 text-[11px] text-white/60">{pct.toFixed(1)}%</div>
-    </button>
-  );
-})}
-</div>
+                <div className="text-lg font-bold leading-none">{d}</div>
+                <div className="mt-1 text-[11px] text-white/60">{pct.toFixed(1)}%</div>
+              </button>
+            );
+          })}
+        </div>
 
-  <p className="text-xs text-white/60 text-center">
-    Based on {ticks.length} ticks from{" "}
-    <span className="font-semibold">{selectedPair}</span> • Last Digit:{" "}
-    <span className="text-emerald-400 font-extrabold text-xl">
-      {lastDigit !== null ? lastDigit : "-"}
-    </span>
-  </p>
-</div>
+        <p className="text-xs text-white/60 text-center">
+          Based on {ticks.length} ticks from <span className="font-semibold">{selectedPair}</span> • Last Digit:{" "}
+          <span className="text-emerald-400 font-extrabold text-xl">{lastDigit !== null ? lastDigit : "-"}</span>
+        </p>
+      </div>
+
       {/* ================= SpiderX Settings ================= */}
       <div className="rounded-xl border border-white/10 bg-white/5 p-4">
         <p className="text-sm font-semibold text-white/90 mb-3">🕷 SpiderX Settings</p>
@@ -2769,10 +2932,10 @@ const [popupDigit, setPopupDigit] = useState<number | null>(null);
               className="w-full bg-[#0e1422] border border-white/10 p-2 rounded-md text-sm"
               value={barrierDigit}
               onChange={(e) => {
-  const d = Number(e.target.value);
-  setBarrierDigit(d);
-  setSelectedDigit(d); // ✅ sync barrier -> Dashboard selectedDigit
-}}
+                const d = Number(e.target.value);
+                setBarrierDigit(d);
+                setSelectedDigit(d);
+              }}
             >
               {Array.from({ length: 10 }, (_, d) => (
                 <option key={d} value={d}>
@@ -2793,112 +2956,115 @@ const [popupDigit, setPopupDigit] = useState<number | null>(null);
 
         {/* Stake */}
         <div className="mb-4">
-  <p className="text-[11px] text-white/60 mb-2">Stake Amount</p>
+          <p className="text-[11px] text-white/60 mb-2">Stake Amount</p>
 
-  <div className="flex gap-2">
-    <input
-      type="number"
-      step="0.1"
-      min="0.1"
-      value={stake}
-      onChange={(e) => setStake(Number(e.target.value))}
-      className="w-full bg-[#0e1422] border border-white/10 p-2 rounded-md text-sm"
-    />
+          <div className="flex gap-2">
+            <input
+              type="number"
+              step="0.1"
+              min="0.1"
+              value={stake}
+              onChange={(e) => setStake(Number(e.target.value))}
+              className="w-full bg-[#0e1422] border border-white/10 p-2 rounded-md text-sm"
+            />
 
-    <button
-      onClick={() => setStake(1)}
-      className="px-3 rounded-md bg-white/5 border border-white/10 text-sm hover:bg-white/10"
-    >
-      $1
-    </button>
+            <button
+              onClick={() => setStake(1)}
+              className="px-3 rounded-md bg-white/5 border border-white/10 text-sm hover:bg-white/10"
+            >
+              $1
+            </button>
 
-    <button
-      onClick={() => setStake(5)}
-      className="px-3 rounded-md bg-white/5 border border-white/10 text-sm hover:bg-white/10"
-    >
-      $5
-    </button>
+            <button
+              onClick={() => setStake(5)}
+              className="px-3 rounded-md bg-white/5 border border-white/10 text-sm hover:bg-white/10"
+            >
+              $5
+            </button>
 
-    <button
-      onClick={() => setStake(10)}
-      className="px-3 rounded-md bg-white/5 border border-white/10 text-sm hover:bg-white/10"
-    >
-      $10
-    </button>
-  </div>
+            <button
+              onClick={() => setStake(10)}
+              className="px-3 rounded-md bg-white/5 border border-white/10 text-sm hover:bg-white/10"
+            >
+              $10
+            </button>
+          </div>
         </div>
 
-        {/* Manual Over/Under */}
-        <p className="text-sm font-semibold text-white/80 mb-2">Manual Over / Under Trading</p>
-        <div className="grid grid-cols-2 gap-3">
-          <button
-            onClick={() => {
-  const now = Date.now();
-  if (now - lastManualRef.current < 400) return;
-  lastManualRef.current = now;
+        {/* ✅ Manual Over/Under (flagged) */}
+        {canShow("spider_manual_over_under") && (
+          <>
+            <p className="text-sm font-semibold text-white/80 mb-2">Manual Over / Under Trading</p>
+            <div className="grid grid-cols-2 gap-3">
+              <button
+                onClick={() => {
+                  const now = Date.now();
+                  if (now - lastManualRef.current < 400) return;
+                  lastManualRef.current = now;
 
-  setManualActive("Over");
+                  setManualActive("Over");
 
-  setSelectedDigit(barrierDigit); // ✅ CRITICAL
-  onPlaceTrade("Over", 1);
+                  setSelectedDigit(barrierDigit);
+                  onPlaceTrade("Over", 1);
 
-  setTimeout(() => setManualActive(null), 300);
-}}
-            className={`rounded-md py-3 font-semibold transition ${
-              manualActive === "Over"
-                ? "bg-emerald-500 shadow-[0_0_20px_rgba(16,185,129,0.9)]"
-                : "bg-emerald-600 hover:bg-emerald-700"
-            }`}
-          >
-            Over {barrierDigit}
-          </button>
+                  setTimeout(() => setManualActive(null), 300);
+                }}
+                className={`rounded-md py-3 font-semibold transition ${
+                  manualActive === "Over"
+                    ? "bg-emerald-500 shadow-[0_0_20px_rgba(16,185,129,0.9)]"
+                    : "bg-emerald-600 hover:bg-emerald-700"
+                }`}
+              >
+                Over {barrierDigit}
+              </button>
 
-          <button
-           onClick={() => {
-  const now = Date.now();
-  if (now - lastManualRef.current < 400) return;
-  lastManualRef.current = now;
+              <button
+                onClick={() => {
+                  const now = Date.now();
+                  if (now - lastManualRef.current < 400) return;
+                  lastManualRef.current = now;
 
-  setManualActive("Under");
+                  setManualActive("Under");
 
-  setSelectedDigit(barrierDigit); // ✅ CRITICAL
-  onPlaceTrade("Under", 1);
+                  setSelectedDigit(barrierDigit);
+                  onPlaceTrade("Under", 1);
 
-  setTimeout(() => setManualActive(null), 300);
-}}
-            className={`rounded-md py-3 font-semibold transition ${
-              manualActive === "Under"
-                ? "bg-red-500 shadow-[0_0_20px_rgba(239,68,68,0.9)]"
-                : "bg-red-600 hover:bg-red-700"
-            }`}
-          >
-            Under {barrierDigit}
-          </button>
-        </div>
+                  setTimeout(() => setManualActive(null), 300);
+                }}
+                className={`rounded-md py-3 font-semibold transition ${
+                  manualActive === "Under"
+                    ? "bg-red-500 shadow-[0_0_20px_rgba(239,68,68,0.9)]"
+                    : "bg-red-600 hover:bg-red-700"
+                }`}
+              >
+                Under {barrierDigit}
+              </button>
+            </div>
+          </>
+        )}
 
-        {/* Random Auto button */}
-        <div className="mt-4">
-          <button
-            onClick={toggleSpiderRandomAuto}
-            className={`w-full py-3 rounded-md font-semibold text-sm transition ${
-              spiderRandomRunning ? "bg-red-600 hover:bg-red-700 animate-pulse" : "bg-indigo-600 hover:bg-indigo-700"
-            }`}
-          >
-            {spiderRandomRunning ? "Stop Random Over/Under" : "🎲 Enable Random Over/Under"}
-          </button>
-          <p className="mt-2 text-xs text-white/60 text-center">Takes fast random Over/Under trades (0.4s, 1 tick)</p>
-        </div>
+        {/* ✅ Random Auto button (flagged) */}
+        {canShow("spider_random_auto") && (
+          <div className="mt-4">
+            <button
+              onClick={toggleSpiderRandomAuto}
+              className={`w-full py-3 rounded-md font-semibold text-sm transition ${
+                spiderRandomRunning ? "bg-red-600 hover:bg-red-700 animate-pulse" : "bg-indigo-600 hover:bg-indigo-700"
+              }`}
+            >
+              {spiderRandomRunning ? "Stop Random Over/Under" : "🎲 Enable Random Over/Under"}
+            </button>
+            <p className="mt-2 text-xs text-white/60 text-center">
+              Takes fast random Over/Under trades (0.4s, 1 tick)
+            </p>
+          </div>
+        )}
       </div>
+
       {/* ================= Trade History (Separate Panel) ================= */}
-<div className="mt-6">
-  <TradeHistoryMetroLike
-    tradeHistory={tradeHistory}
-    currency={currency}
-    onClear={onClearHistory}
-  />
-</div>
-
-
+      <div className="mt-6">
+        <TradeHistoryMetroLike tradeHistory={tradeHistory} currency={currency} onClear={onClearHistory} />
+      </div>
     </div>
   );
 }

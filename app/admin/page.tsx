@@ -5,6 +5,29 @@ import { useRouter } from "next/navigation";
 
 type Flags = { matches: boolean; overunder: boolean };
 const DEFAULT_FLAGS: Flags = { matches: true, overunder: true };
+type UIFlags = {
+  metro_place_trade: boolean;
+  metro_edshell: boolean;
+  metro_3x: boolean;
+  metro_5x: boolean;
+  metro_1x_auto: boolean;
+  metro_fast_auto: boolean;
+  spider_analyzer: boolean;
+  spider_manual_over_under: boolean;
+  spider_random_auto: boolean;
+};
+
+const DEFAULT_UI_FLAGS: UIFlags = {
+  metro_place_trade: true,
+  metro_edshell: true,
+  metro_3x: true,
+  metro_5x: true,
+  metro_1x_auto: true,
+  metro_fast_auto: true,
+  spider_analyzer: true,
+  spider_manual_over_under: true,
+  spider_random_auto: true,
+};
 
 type DbUser = {
   id: string;
@@ -15,6 +38,8 @@ type DbUser = {
 
 export default function AdminPage() {
   const router = useRouter();
+  const [uiFlags, setUiFlags] = useState<UIFlags>(DEFAULT_UI_FLAGS);
+const [uiSavedMsg, setUiSavedMsg] = useState("");
 
   const [ready, setReady] = useState(false);
   const [email, setEmail] = useState("admin");
@@ -45,8 +70,9 @@ export default function AdminPage() {
     setEmail(localStorage.getItem("email") || "admin");
 
     setReady(true);
-    void loadFlags();
-    void loadUsers();
+void loadFlags();
+void loadUIFlags();
+void loadUsers();
   }, [router]);
 
   const logout = () => {
@@ -56,55 +82,83 @@ export default function AdminPage() {
 
   /* ===================== LOAD / SAVE STRATEGIES ===================== */
 
-  async function loadFlags() {
+async function loadFlags() {
   try {
     const res = await fetch("/api/admin/strategies", { cache: "no-store" });
     const data = await res.json();
 
     if (data?.ok) {
       const f = data.flags ?? DEFAULT_FLAGS;
-
       setFlags(f);
-
-      // ✅ CRITICAL: sync to localStorage so Dashboard sees it
       localStorage.setItem("strategy_flags", JSON.stringify(f));
     }
   } catch {}
 }
 
-  async function saveFlags() {
-    setSavedMsg("");
+async function saveFlags() {
+  setSavedMsg("");
 
-    try {
-      const res = await fetch("/api/admin/strategies", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          matches: flags.matches,
-          overunder: flags.overunder
-        }),
-      });
+  try {
+    const res = await fetch("/api/admin/strategies", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        matches: flags.matches,
+        overunder: flags.overunder,
+      }),
+    });
 
-      const data = await res.json();
-      if (!res.ok || !data?.ok) throw new Error(data?.error || "Save failed");
+    const data = await res.json();
+    if (!res.ok || !data?.ok) throw new Error(data?.error || "Save failed");
 
-      const newFlags = data.flags ?? flags;
+    const newFlags = data.flags ?? flags;
+    setFlags(newFlags);
 
-setFlags(newFlags);
+    localStorage.setItem("strategy_flags", JSON.stringify(newFlags));
 
-// ✅ CRITICAL: sync to localStorage so users see it
-localStorage.setItem("strategy_flags", JSON.stringify(newFlags));
-
-setSavedMsg("Saved! Users will see changes immediately.");
-// 🔑 ALSO write to localStorage so users can read it
-localStorage.setItem("strategy_flags", JSON.stringify(data.flags));
-      setTimeout(() => setSavedMsg(""), 2000);
-
-    } catch (e: any) {
-      setSavedMsg(e?.message || "Failed to save.");
-      setTimeout(() => setSavedMsg(""), 2500);
-    }
+    setSavedMsg("Saved! Users will see changes immediately.");
+    setTimeout(() => setSavedMsg(""), 2000);
+  } catch (e: any) {
+    setSavedMsg(e?.message || "Failed to save.");
+    setTimeout(() => setSavedMsg(""), 2500);
   }
+}
+
+/* ===================== LOAD / SAVE UI FLAGS ===================== */
+
+async function loadUIFlags() {
+  try {
+    const res = await fetch("/api/admin/ui-flags", { cache: "no-store" });
+    const data = await res.json();
+    if (data?.ok) setUiFlags(data.flags ?? DEFAULT_UI_FLAGS);
+  } catch {}
+}
+
+async function saveUIFlags() {
+  setUiSavedMsg("");
+
+  try {
+    const res = await fetch("/api/admin/ui-flags", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(uiFlags),
+    });
+
+    const data = await res.json();
+    if (!res.ok || !data?.ok) throw new Error(data?.error || "Save failed");
+
+    setUiFlags(data.flags ?? uiFlags);
+
+    // optional (only helps if you also read it from localStorage on user dashboard)
+    localStorage.setItem("ui_flags", JSON.stringify(data.flags ?? uiFlags));
+
+    setUiSavedMsg("Saved!");
+    setTimeout(() => setUiSavedMsg(""), 2000);
+  } catch (e: any) {
+    setUiSavedMsg(e?.message || "Failed");
+    setTimeout(() => setUiSavedMsg(""), 2500);
+  }
+}
 
   /* ===================== USER MANAGEMENT ===================== */
 
@@ -263,6 +317,105 @@ localStorage.setItem("strategy_flags", JSON.stringify(data.flags));
 
           {savedMsg && <p className="mt-3 text-xs text-emerald-300">{savedMsg}</p>}
         </section>
+
+        {/* UI FLAGS (hide/show buttons for USERS) */}
+<section className="rounded-lg bg-black/30 border border-white/10 p-4">
+  <p className="text-sm font-semibold mb-3">Show / Hide buttons for USERS</p>
+
+  <div className="space-y-3 text-sm">
+    <label className="flex items-center justify-between">
+      <span>MetroX: Place Trade</span>
+      <input
+        type="checkbox"
+        checked={uiFlags.metro_place_trade}
+        onChange={(e) => setUiFlags((u) => ({ ...u, metro_place_trade: e.target.checked }))}
+      />
+    </label>
+
+    <label className="flex items-center justify-between">
+      <span>MetroX: Edshell</span>
+      <input
+        type="checkbox"
+        checked={uiFlags.metro_edshell}
+        onChange={(e) => setUiFlags((u) => ({ ...u, metro_edshell: e.target.checked }))}
+      />
+    </label>
+
+    <label className="flex items-center justify-between">
+      <span>MetroX: 3x Selected Digit</span>
+      <input
+        type="checkbox"
+        checked={uiFlags.metro_3x}
+        onChange={(e) => setUiFlags((u) => ({ ...u, metro_3x: e.target.checked }))}
+      />
+    </label>
+
+    <label className="flex items-center justify-between">
+      <span>MetroX: 5x AutoTrading</span>
+      <input
+        type="checkbox"
+        checked={uiFlags.metro_5x}
+        onChange={(e) => setUiFlags((u) => ({ ...u, metro_5x: e.target.checked }))}
+      />
+    </label>
+
+    <label className="flex items-center justify-between">
+      <span>MetroX: 1x Auto All Pairs</span>
+      <input
+        type="checkbox"
+        checked={uiFlags.metro_1x_auto}
+        onChange={(e) => setUiFlags((u) => ({ ...u, metro_1x_auto: e.target.checked }))}
+      />
+    </label>
+
+    <label className="flex items-center justify-between">
+      <span>MetroX: Fast AutoTrading</span>
+      <input
+        type="checkbox"
+        checked={uiFlags.metro_fast_auto}
+        onChange={(e) => setUiFlags((u) => ({ ...u, metro_fast_auto: e.target.checked }))}
+      />
+    </label>
+
+    <hr className="border-white/10 my-2" />
+
+    <label className="flex items-center justify-between">
+      <span>SpiderX: Analyzer</span>
+      <input
+        type="checkbox"
+        checked={uiFlags.spider_analyzer}
+        onChange={(e) => setUiFlags((u) => ({ ...u, spider_analyzer: e.target.checked }))}
+      />
+    </label>
+
+    <label className="flex items-center justify-between">
+      <span>SpiderX: Manual Over/Under</span>
+      <input
+        type="checkbox"
+        checked={uiFlags.spider_manual_over_under}
+        onChange={(e) => setUiFlags((u) => ({ ...u, spider_manual_over_under: e.target.checked }))}
+      />
+    </label>
+
+    <label className="flex items-center justify-between">
+      <span>SpiderX: Random Auto</span>
+      <input
+        type="checkbox"
+        checked={uiFlags.spider_random_auto}
+        onChange={(e) => setUiFlags((u) => ({ ...u, spider_random_auto: e.target.checked }))}
+      />
+    </label>
+  </div>
+
+  <button
+    onClick={saveUIFlags}
+    className="mt-4 w-full py-2 rounded-md bg-emerald-600 hover:bg-emerald-700 text-sm font-semibold"
+  >
+    Save UI Changes
+  </button>
+
+  {uiSavedMsg && <p className="mt-3 text-xs text-emerald-300">{uiSavedMsg}</p>}
+</section>
 
         {/* USER MANAGEMENT */}
         <section className="rounded-lg bg-black/30 border border-white/10 p-4">
