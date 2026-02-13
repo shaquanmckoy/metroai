@@ -73,6 +73,9 @@ export default function AdminPage() {
   const [newRole, setNewRole] = useState<"admin" | "user">("user");
   const [userMsg, setUserMsg] = useState("");
 
+  // ✅ IMPORTANT FIX: hooks must run on EVERY render (before any early return)
+  const usersSorted = useMemo(() => [...users], [users]);
+
   /* ===================== AUTH CHECK ===================== */
   useEffect(() => {
     const loggedIn = localStorage.getItem("loggedIn") === "true";
@@ -93,6 +96,7 @@ export default function AdminPage() {
     void loadFlags();
     void loadUIFlags();
     void loadUsers();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [router]);
 
   const logout = () => {
@@ -163,8 +167,9 @@ export default function AdminPage() {
       const data = await res.json();
       if (!res.ok || !data?.ok) throw new Error(data?.error || "Save failed");
 
-      setUiFlags(data.flags ?? uiFlags);
-      localStorage.setItem("ui_flags", JSON.stringify(data.flags ?? uiFlags));
+      const nextFlags = data.flags ?? uiFlags;
+      setUiFlags(nextFlags);
+      localStorage.setItem("ui_flags", JSON.stringify(nextFlags));
 
       setUiSavedMsg("Saved!");
       setTimeout(() => setUiSavedMsg(""), 2000);
@@ -243,8 +248,6 @@ export default function AdminPage() {
     );
   }
 
-  const usersSorted = useMemo(() => [...users], [users]);
-
   /* ===================== MAIN ADMIN UI ===================== */
   return (
     <main className="min-h-screen bg-gradient-to-b from-[#0f0f14] via-[#0b0c11] to-[#050507] text-white p-6 flex items-start justify-center">
@@ -256,9 +259,7 @@ export default function AdminPage() {
             <p className="text-xs text-white/60">Signed in as: {email}</p>
           </div>
 
-          <span className="text-[10px] px-2 py-1 rounded bg-red-600/80 font-bold shadow">
-            ADMIN
-          </span>
+          <span className="text-[10px] px-2 py-1 rounded bg-red-600/80 font-bold shadow">ADMIN</span>
         </div>
 
         {/* Back button */}
@@ -378,9 +379,7 @@ export default function AdminPage() {
               <input
                 type="checkbox"
                 checked={uiFlags.spider_manual_over_under}
-                onChange={(e) =>
-                  setUiFlags((u) => ({ ...u, spider_manual_over_under: e.target.checked }))
-                }
+                onChange={(e) => setUiFlags((u) => ({ ...u, spider_manual_over_under: e.target.checked }))}
               />
             </label>
 
@@ -472,7 +471,6 @@ export default function AdminPage() {
                       <div className="font-semibold flex items-center gap-2 min-w-0">
                         <span className="truncate">{u.email}</span>
 
-                        {/* Login badge */}
                         <span
                           className="text-[10px] px-2 py-0.5 rounded-full bg-white/10 border border-white/10 text-white/80 shrink-0"
                           title={`Login count: ${count}`}
@@ -496,9 +494,7 @@ export default function AdminPage() {
                         last login: <span className="text-white/80">{lastLogin}</span>
                         {" • "}
                         device:{" "}
-                        <span className={device ? "text-white/80" : "text-white/50"}>
-                          {device || "—"}
-                        </span>
+                        <span className={device ? "text-white/80" : "text-white/50"}>{device || "—"}</span>
                       </div>
                     </div>
 
