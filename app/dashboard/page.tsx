@@ -69,7 +69,7 @@ type TradeResult = "Win" | "Loss" | "Pending";
 type TradeType = "Matches" | "Differs" | "Over" | "Under";
 
 type Trade = {
-  source?: "MetroX" | "SpiderX" | "SpiderX Auto" | "Edshell";
+ source?: "MetroX" | "Metro" | "SpiderX" | "SpiderX Auto" | "Edshell";
   id: number; // req_id
   contract_id?: number;
 
@@ -109,18 +109,23 @@ function formatTime(ms: number) {
 function MarketIndicator({
   activeStrategy,
   selectedPair,
+  pairDigitsRef,
 }: {
   activeStrategy: "matches" | "overunder" | null;
   selectedPair: Pair;
+  pairDigitsRef: React.MutableRefObject<Record<Pair, number[]>>;
 }) {
   const [now, setNow] = useState(() => new Date());
+  // ✅ Risk memory (per index) — prevents flip-flopping
+const riskEmaRef = useRef<Record<string, number>>({});
+const riskHistRef = useRef<Record<string, number[]>>({});
 
   useEffect(() => {
     const t = window.setInterval(() => setNow(new Date()), 1000);
     return () => window.clearInterval(t);
   }, []);
 
-  // Use UTC sessions (simple + consistent)
+  // ===================== TIME (UTC) =====================
   const utcH = now.getUTCHours();
   const utcM = now.getUTCMinutes();
   const utcTotalMin = utcH * 60 + utcM;
@@ -128,12 +133,18 @@ function MarketIndicator({
   const localDay = now.getDay(); // 0 Sun ... 6 Sat
   const isWeekend = localDay === 0 || localDay === 6;
 
-  // Simple session windows (UTC)
+  // ===================== INDEX TYPE =====================
+  const is1HZ = selectedPair.startsWith("1HZ");
+  const isJump = selectedPair.startsWith("JD") || selectedPair === "RDBEAR" || selectedPair === "RDBULL";
+
+  // ===================== SESSIONS (UTC) =====================
   const inAsia = utcTotalMin >= 0 * 60 && utcTotalMin < 9 * 60;
   const inLondon = utcTotalMin >= 8 * 60 && utcTotalMin < 17 * 60;
   const inNY = utcTotalMin >= 13 * 60 && utcTotalMin < 22 * 60;
 
-  const overlap = (inAsia && inLondon) || (inLondon && inNY);
+  const overlapAL = inAsia && inLondon;   // 08:00 - 09:00
+  const overlapLN = inLondon && inNY;     // 13:00 - 17:00
+  const overlap = overlapAL || overlapLN;
 
   const zone = overlap
     ? "Overlap (higher movement)"
@@ -145,19 +156,370 @@ function MarketIndicator({
     ? "Asia (Tokyo)"
     : "Off-hours";
 
-  const nextRecommendation =
-    overlap ? "Best time (if you’re focused)" : zone === "Off-hours" ? "Not ideal (more randomness)" : "Okay time";
+  // ===================== TRANSITION WINDOWS =====================
+  const TRANSITION_MIN = 30;
+  const OVERLAP_TRANSITION_MIN = 15;
 
+  const boundaries = [0 * 60, 8 * 60, 9 * 60, 13 * 60, 17 * 60, 22 * 60];
+
+  const distToBoundary = (t: number, b: number) => {
+    const d = Math.abs(t - b);
+    return Math.min(d, 24 * 60 - d);
+  };
+
+  const nearestBoundary = boundaries
+    .map((b) => ({ b, d: distToBoundary(utcTotalMin, b) }))
+    .sort((a, b) => a.d - b.d)[0];
+
+  const isOverlapBoundary =
+    nearestBoundary.b === 8 * 60 ||
+    nearestBoundary.b === 9 * 60 ||
+    nearestBoundary.b === 13 * 60 ||
+    nearestBoundary.b === 17 * 60;
+
+  const inTransition =
+    (isOverlapBoundary && nearestBoundary.d <= OVERLAP_TRANSITION_MIN) ||
+    (!isOverlapBoundary && nearestBoundary.d <= TRANSITION_MIN);
+
+  const transitionLabel = inTransition
+    ? `Transition (${nearestBoundary.d}m from ${String(Math.floor(nearestBoundary.b / 60)).padStart(2, "0")}:${String(
+        nearestBoundary.b % 60
+      ).padStart(2, "0")} UTC)`
+    : "Stable";
+
+  // ===================== LIVE MARKET BEHAVIOR (NEW) =====================
+  const ticksAll = pairDigitsRef.current[selectedPair] ?? [];
+  const last200 = ticksAll.slice(-200);
+  const last50 = ticksAll.slice(-50);
+  const last20 = ticksAll.slice(-20);
+  const last10 = ticksAll.slice(-10);
+  const last5 = ticksAll.slice(-5);
+
+  const ready20 = last20.length >= 20;
+  const ready50 = last50.length >= 50;
+  const ready200 = last200.length >= 200;
+
+  const freq = (arr: number[]) => {
+    const f = Array.from({ length: 10 }, () => 0);
+    for (const d of arr) f[d]++;
+    return f;
+  };
+
+  const pct = (f: number[], n: number) => f.map((x) => (n ? (x / n) * 100 : 0));
+
+  const f200 = freq(last200);
+  const p200 = pct(f200, last200.length);
+
+  const f20 = freq(last20);
+  const p20 = pct(f20, last20.length);
+
+  // entropy (0..1): higher => more uniform/random distribution
+  const entropy01 = (f: number[], n: number) => {
+    if (!n) return 0;
+    let h = 0;
+    for (let i = 0; i < 10; i++) {
+      const pi = f[i] / n;
+      if (pi > 0) h += -pi * Math.log(pi);
+    }
+    const max = Math.log(10);
+    return max ? h / max : 0;
+  };
+
+  // ✅ Chi-square vs uniform distribution (expected = n/10)
+// LOWER = digits look very uniform (more random-like)
+// HIGHER = digits NOT uniform
+const chiSquareUniform = (f: number[], n: number) => {
+  if (!n) return 0;
+  const expected = n / 10;
+  let chi = 0;
+  for (let i = 0; i < 10; i++) {
+    const diff = f[i] - expected;
+    chi += (diff * diff) / expected;
+  }
+  return chi;
+};
+
+  const H200 = entropy01(f200, last200.length);
+  const chi200 = ready200 ? chiSquareUniform(f200, last200.length) : 0;
+
+  // churn + streaks (behavior risk)
+  const repeatRate = (arr: number[]) => {
+    if (arr.length < 2) return 0;
+    let same = 0;
+    for (let i = 1; i < arr.length; i++) if (arr[i] === arr[i - 1]) same++;
+    return (same / (arr.length - 1)) * 100;
+  };
+
+  const maxStreak = (arr: number[]) => {
+    let best = 1;
+    let cur = 1;
+    for (let i = 1; i < arr.length; i++) {
+      if (arr[i] === arr[i - 1]) {
+        cur++;
+        if (cur > best) best = cur;
+      } else {
+        cur = 1;
+      }
+    }
+    return best;
+  };
+
+  const rep50 = repeatRate(last50);
+  const streak50 = maxStreak(last50);
+
+  // quick “shock” detector: last10 distribution suddenly concentrated
+  const shock = (() => {
+    if (last10.length < 10) return false;
+    const f10 = freq(last10);
+    const max10 = Math.max(...f10);
+    return max10 >= 4; // 40%+ of last 10 on one digit
+  })();
+
+  // ===================== STRATEGY EDGE SCORE (NEW) =====================
   const stratName =
     activeStrategy === "matches" ? "MetroX" : activeStrategy === "overunder" ? "SpiderX" : "No strategy selected";
 
-  // Very light index guidance (you can tweak later)
-  const indexTip =
-    activeStrategy === "matches"
-      ? "MetroX: prefer R_25 / R_50 (or 1HZ if you want faster)."
-      : activeStrategy === "overunder"
-      ? "SpiderX: start with R_50 / R_75, only trade strong % signals."
-      : "Pick a strategy to see index tips.";
+  // MetroX (DIFFERS edge): we want a *least frequent digit*, low pct, and NOT seen in last5
+  const metroEdge = (() => {
+    if (!ready20) return null;
+
+    let lowDigit = 0;
+    let lowPct20 = Infinity;
+    for (let d = 0; d <= 9; d++) {
+      if (p20[d] < lowPct20) {
+        lowPct20 = p20[d];
+        lowDigit = d;
+      }
+    }
+
+    const lowPct200 = ready200 ? p200[lowDigit] : null;
+    const blocked = last5.includes(lowDigit);
+
+    // simple tiering
+    const score =
+      lowPct20 <= 2.0 && !blocked ? 3 :
+      lowPct20 <= 3.0 && !blocked ? 2 :
+      lowPct20 <= 4.0 && !blocked ? 1 :
+      0;
+
+    return { lowDigit, lowPct20, lowPct200, blocked, score };
+  })();
+
+  // SpiderX edge: pick best of common Over/Under barriers using last20
+  const spiderEdge = (() => {
+    if (!ready20) return null;
+
+    const pctHits = (cond: (d: number) => boolean) => {
+      let hits = 0;
+      for (const d of last20) if (cond(d)) hits++;
+      return (hits / 20) * 100;
+    };
+
+    const candidates = [
+      { label: "OVER 0", type: "Over" as const, barrier: 0, pct: pctHits((d) => d > 0) },
+      { label: "OVER 1", type: "Over" as const, barrier: 1, pct: pctHits((d) => d > 1) },
+      { label: "UNDER 9", type: "Under" as const, barrier: 9, pct: pctHits((d) => d < 9) },
+      { label: "UNDER 8", type: "Under" as const, barrier: 8, pct: pctHits((d) => d < 8) },
+    ].sort((a, b) => b.pct - a.pct);
+
+    const best = candidates[0];
+    const score = best.pct >= 95 ? 3 : best.pct >= 92 ? 2 : best.pct >= 90 ? 1 : 0;
+
+    return { best, score };
+  })();
+
+  // ===================== RISK SCORE (UPDATED) =====================
+  let riskScore = 0;
+  const riskReasons: string[] = [];
+
+  // timing risk
+  if (zone === "Off-hours") {
+    riskScore += 2;
+    riskReasons.push("Off-hours (randomness / fatigue risk)");
+  } else if (overlap) {
+    riskScore += 1;
+    riskReasons.push("Overlap = faster movement (discipline needed)");
+  }
+
+  if (inTransition) {
+    riskScore += 2;
+    riskReasons.push("Transition window (momentum shifts)");
+  }
+
+  if (isWeekend) {
+    riskScore += 1;
+    riskReasons.push("Weekend discipline risk");
+  }
+
+  // instrument risk
+  if (is1HZ) {
+    riskScore += 2;
+    riskReasons.push("1HZ speed risk (execution errors)");
+  }
+  if (isJump) {
+    riskScore += 2;
+    riskReasons.push("Jump/Bull/Bear spike risk");
+  }
+
+ // ✅ LIVE behavior risk (UPGRADED)
+if (!ready20) {
+  riskScore += 2;
+  riskReasons.push("Not enough ticks yet (need 20+)");
+} else {
+  // --- Randomness detection (stronger than entropy alone) ---
+  // If chi-square is LOW, digits look very uniform → random-like → risky for edge strategies
+  if (ready200) {
+    if (chi200 <= 6.0) {
+      riskScore += 3;
+      riskReasons.push("Very uniform digits (random-like) [chi² low]");
+    } else if (chi200 <= 10.0) {
+      riskScore += 2;
+      riskReasons.push("Uniform-ish digits (random-like) [chi² moderate]");
+    }
+
+    // Keep entropy too, but lower weight now
+    if (H200 >= 0.975) {
+      riskScore += 1;
+      riskReasons.push("High entropy (random-like)");
+    }
+  }
+
+  // --- Choppy / spike behavior ---
+  if (ready50 && rep50 >= 18) {
+    riskScore += 1;
+    riskReasons.push("Higher repeat rate (choppy tape)");
+  }
+  if (ready50 && streak50 >= 4) {
+    riskScore += 2;
+    riskReasons.push("Streaky bursts detected");
+  }
+  if (shock) {
+    riskScore += 2;
+    riskReasons.push("Short-term concentration (shock in last 10)");
+  }
+}
+
+  // strategy edge reduces risk (because you have “reason” to trade)
+  if (activeStrategy === "matches" && metroEdge) {
+    if (metroEdge.score >= 2) {
+      riskScore -= 2;
+      riskReasons.push("Metro edge strong (least digit is low & not recent)");
+    } else if (metroEdge.score === 1) {
+      riskScore -= 1;
+      riskReasons.push("Metro edge moderate");
+    } else {
+      riskScore += 1;
+      riskReasons.push("Metro edge weak (avoid forcing trades)");
+    }
+    if (metroEdge.blocked) {
+      riskScore += 1;
+      riskReasons.push("Target digit appeared in last 5 ticks");
+    }
+  }
+
+  if (activeStrategy === "overunder" && spiderEdge) {
+    if (spiderEdge.score >= 2) {
+      riskScore -= 2;
+      riskReasons.push("Spider edge strong (best Over/Under % is high)");
+    } else if (spiderEdge.score === 1) {
+      riskScore -= 1;
+      riskReasons.push("Spider edge moderate");
+    } else {
+      riskScore += 2;
+      riskReasons.push("Spider edge weak (avoid trading)");
+    }
+  }
+
+  if (!activeStrategy) {
+    riskScore += 2;
+    riskReasons.push("No strategy selected");
+  }
+
+  // clamp 0..10
+  riskScore = Math.max(0, Math.min(10, riskScore));
+  // ✅ Smooth risk (EMA) + confirm sustained HIGH risk
+const key = selectedPair;
+
+// EMA smoothing (stable display)
+const prevEma = riskEmaRef.current[key] ?? riskScore;
+const alpha = 0.25; // 0.25 = good balance
+const ema = prevEma + alpha * (riskScore - prevEma);
+riskEmaRef.current[key] = ema;
+
+const riskScoreDisplayed = Math.round(ema * 10) / 10;
+
+// Track last ~12 seconds of raw risk for confirmation
+const hist = riskHistRef.current[key] ?? [];
+hist.push(riskScore);
+if (hist.length > 12) hist.shift();
+riskHistRef.current[key] = hist;
+
+// Only allow HIGH if last ~8 seconds were all >= 7
+const sustainedHigh = hist.length >= 8 && hist.slice(-8).every((x) => x >= 7);
+
+// Use smoothed score to set level
+let riskLevel =
+  riskScoreDisplayed >= 7 ? "HIGH" : riskScoreDisplayed >= 4 ? "MEDIUM" : "LOW";
+
+// ✅ downgrade HIGH spikes until confirmed
+if (riskLevel === "HIGH" && !sustainedHigh) {
+  riskLevel = "MEDIUM";
+  riskReasons.push("High-risk spike detected, waiting for confirmation…");
+}
+
+  const riskColor =
+  riskLevel === "HIGH"
+    ? "text-red-300"
+    : riskLevel === "MEDIUM"
+    ? "text-yellow-200"
+    : "text-emerald-300";
+
+  const tradeAdvice =
+    riskLevel === "HIGH"
+      ? "High risk: avoid auto-trading; only trade if edge is very strong."
+      : riskLevel === "MEDIUM"
+      ? "Medium risk: smaller size, fewer entries, no rushing."
+      : "Low risk: normal routine (still require a real edge).";
+
+  // ===================== BETTER INDEX RECOMMENDATION =====================
+  const indexTip = (() => {
+    if (!activeStrategy) return "Pick MetroX or SpiderX to get live edge-based recommendations.";
+
+    if (activeStrategy === "matches") {
+      const edgeTxt =
+        metroEdge && ready20
+          ? `Live Metro edge: least digit ${metroEdge.lowDigit} is ${metroEdge.lowPct20.toFixed(1)}% (last20)${
+              metroEdge.lowPct200 != null ? ` • ${metroEdge.lowPct200.toFixed(1)}% (last200)` : ""
+            }${metroEdge.blocked ? " • ⚠️ appeared in last5" : ""}`
+          : "Live Metro edge: collecting 20 ticks…";
+
+      if (riskLevel === "HIGH") return `MetroX: stay on R_25 / R_50. Avoid 1HZ + Jump during HIGH risk.\n${edgeTxt}`;
+      if (riskLevel === "MEDIUM") return `MetroX: R_25 / R_50 best. Use 1HZ only if you reduce stake + slow down.\n${edgeTxt}`;
+      return `MetroX: R_25 / R_50 stable. 1HZ only if you can control entries.\n${edgeTxt}`;
+    }
+
+    // SpiderX
+    const edgeTxt =
+      spiderEdge && ready20
+        ? `Live Spider edge: best is ${spiderEdge.best.label} at ${spiderEdge.best.pct.toFixed(1)}% (last20)`
+        : "Live Spider edge: collecting 20 ticks…";
+
+    if (riskLevel === "HIGH") return `SpiderX: prefer R_50 / R_75 only. Avoid Jump + 1HZ in HIGH risk.\n${edgeTxt}`;
+    if (riskLevel === "MEDIUM") return `SpiderX: R_50 / R_75. Trade strong signals (≥92–95%).\n${edgeTxt}`;
+    return `SpiderX: R_50 / R_75 safest. Expand only if signals stay strong.\n${edgeTxt}`;
+  })();
+
+  const conflictWarning =
+    riskLevel === "HIGH" && (is1HZ || isJump)
+      ? "⚠️ Current index type is HIGH-risk for current conditions. Consider switching to R_25 / R_50."
+      : riskLevel === "MEDIUM" && isJump
+      ? "⚠️ Jump/Bull/Bear is riskier in medium conditions — only trade strongest edge."
+      : "";
+
+  // display a compact “market behavior” line
+  const behaviorLine = ready50
+    ? `Entropy${ready200 ? `200=${(H200 * 100).toFixed(0)}%` : ""} • Repeat50=${rep50.toFixed(0)}% • MaxStreak50=${streak50}${shock ? " • Shock" : ""}`
+    : "Collecting ticks for behavior stats…";
 
   return (
     <div className="bg-[#13233d]/80 backdrop-blur rounded-2xl p-5 border border-white/10 shadow-[0_0_0_1px_rgba(255,255,255,0.06)]">
@@ -179,25 +541,44 @@ function MarketIndicator({
         <div className="rounded-xl bg-black/20 border border-white/10 p-3">
           <p className="text-[11px] text-white/60">Current Zone</p>
           <p className={`mt-1 font-bold ${overlap ? "text-emerald-300" : "text-sky-300"}`}>{zone}</p>
-          <p className="text-[11px] text-white/55 mt-1">{nextRecommendation}</p>
+          <p className="text-[11px] text-white/55 mt-1">{transitionLabel}</p>
+          <p className="text-[11px] text-white/55 mt-2">{behaviorLine}</p>
         </div>
 
         <div className="rounded-xl bg-black/20 border border-white/10 p-3">
-          <p className="text-[11px] text-white/60">When NOT to trade</p>
-          <ul className="mt-1 text-[11px] text-white/70 space-y-1 list-disc pl-4">
-            <li>{isWeekend ? "Weekend: trade only if disciplined." : "Weekday: normal routine."}</li>
-            <li>Off-hours: avoid if you’re tired / rushed.</li>
-            <li>No signal = no trade.</li>
-          </ul>
+          <p className="text-[11px] text-white/60">Risk Level</p>
+          <p className={`mt-1 font-extrabold ${riskColor}`}>{riskLevel}</p>
+          {riskLevel === "MEDIUM" && !sustainedHigh && (
+  <p className="text-[11px] text-white/55 mt-1">Confirming if HIGH risk is sustained…</p>
+)}
+          <p className="text-[11px] text-white/55 mt-1">{tradeAdvice}</p>
+          <p className="text-[11px] text-white/55 mt-2">
+  Risk score (smoothed): {riskScoreDisplayed}/10
+</p>
         </div>
       </div>
 
       <div className="mt-3 rounded-xl bg-white/5 border border-white/10 p-3">
-        <p className="text-[11px] text-white/60">Index recommendation</p>
-        <p className="text-xs text-white/75 mt-1">{indexTip}</p>
-        <p className="text-[11px] text-white/50 mt-2">
-          Note: Synthetic indices run 24/7 — sessions are for *your* timing/discipline.
-        </p>
+        <p className="text-[11px] text-white/60">Index recommendation (live)</p>
+        <p className="text-xs text-white/75 mt-1 whitespace-pre-line">{indexTip}</p>
+
+        {conflictWarning && <p className="text-[11px] mt-2 text-yellow-200/90">{conflictWarning}</p>}
+
+        <div className="mt-3">
+          <p className="text-[11px] text-white/60 mb-1">Why this risk?</p>
+          {riskReasons.length === 0 ? (
+            <p className="text-[11px] text-white/55">No major risk flags detected.</p>
+          ) : (
+            <ul className="text-[11px] text-white/70 space-y-1 list-disc pl-4">
+              {riskReasons.slice(0, 6).map((r, i) => (
+                <li key={i}>{r}</li>
+              ))}
+            </ul>
+          )}
+          <p className="text-[11px] text-white/50 mt-2">
+            Note: This measures *conditions + discipline + edge*, not a “prediction.”
+          </p>
+        </div>
       </div>
     </div>
   );
@@ -221,6 +602,7 @@ const UI_FLAGS_KEY = "ui_flags";
 type UIFlags = {
   metro_place_trade: boolean;
   metro_edshell: boolean;
+  metro_metro: boolean; // ✅ NEW
   metro_3x: boolean;
   metro_5x: boolean;
   metro_1x_auto: boolean;
@@ -233,6 +615,7 @@ type UIFlags = {
 const DEFAULT_UI_FLAGS: UIFlags = {
   metro_place_trade: true,
   metro_edshell: true,
+  metro_metro: true,
   metro_3x: true,
   metro_5x: true,
   metro_1x_auto: true,
@@ -250,6 +633,7 @@ function readUIFlags(): UIFlags {
     return {
       metro_place_trade: typeof v.metro_place_trade === "boolean" ? v.metro_place_trade : true,
       metro_edshell: typeof v.metro_edshell === "boolean" ? v.metro_edshell : true,
+      metro_metro: typeof v.metro_metro === "boolean" ? v.metro_metro : true,
       metro_3x: typeof v.metro_3x === "boolean" ? v.metro_3x : true,
       metro_5x: typeof v.metro_5x === "boolean" ? v.metro_5x : true,
       metro_1x_auto: typeof v.metro_1x_auto === "boolean" ? v.metro_1x_auto : true,
@@ -400,6 +784,13 @@ useEffect(() => {
   useEffect(() => {
   selectedPairRef.current = selectedPair;
 }, [selectedPair]);
+// ================= METRO AUTO (NEW) =================
+const [metroRunning, setMetroRunning] = useState(false);
+const metroCancelRef = useRef(false);
+const metroLoopRef = useRef(false);
+
+// prevent repeating same pair too fast
+const metroLastTradeAtRef = useRef<Record<string, number>>({});
 // 🛑 stop Fast AutoTrading when switching index
 useEffect(() => {
   if (fastAutoRunning) {
@@ -693,10 +1084,11 @@ const resetPairNow = (p: Pair) => {
   const symbol = data.tick.symbol as Pair;
   if (!PAIRS.includes(symbol)) return;
 
-  // ✅ do NOT process ticks unless MetroX is active (closure-safe)
+ // ✅ allow ticks if ANY strategy is open OR Metro auto is running
 if (
   activeStrategyRef.current !== "matches" &&
-  activeStrategyRef.current !== "overunder"
+  activeStrategyRef.current !== "overunder" &&
+  !metroLoopRef.current
 ) return;
 
   const ps = typeof data.tick.pip_size === "number" ? data.tick.pip_size : pipSize;
@@ -1028,6 +1420,251 @@ await placeDiffersAndWaitBuyAck(selectedPair, selectedDigit, { index: 3, total: 
     alert(err instanceof Error ? err.message : "We couldn't process your trade.");
   } finally {
     setInstant3xRunning(false);
+  }
+};
+
+// ================= METRO AUTO TOGGLE (UPGRADED) =================
+// Press Metro -> keeps scanning + trading until Stop Metro
+const toggleMetroAuto = async () => {
+  // STOP
+  if (metroRunning) {
+    metroCancelRef.current = true;
+    setAnalysisStatus("Stopping Metro...");
+    return;
+  }
+
+  // START checks
+  if (!stake || stake <= 0) return alert("Enter a stake amount");
+  if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return alert("WebSocket not connected");
+  if (!authorizedRef.current) return alert("Not authorized");
+
+  metroCancelRef.current = false;
+  setMetroRunning(true);
+
+  if (metroLoopRef.current) return;
+  metroLoopRef.current = true;
+
+  // ================== TUNABLE RULES ==================
+  const SAMPLE_N = 1000;          // main sample window (long)
+  const RECENT_N = 120;           // recent window (short)
+  const MIN_SAMPLE = 250;
+
+  const MAX_MATCH_PCT = 5.3;      // long-window max
+  const MAX_RECENT_PCT = 6.0;     // must ALSO be low recently (prevents stale edge)
+  const MAX_LAST10_HITS = 1;      // digit must appear <= 1 time in last10
+  const MAX_LAST20_HITS = 3;      // digit must appear <= 3 times in last20
+
+  const COOLDOWN_MS = 30_000;
+  const LOOP_DELAY_MS = 800;
+  // ✅ MISSING CONSTANTS (fixes the TS errors)
+const MAX_BAD_CYCLES = 10;     // how many "no signal" loops before backoff
+const MAX_FAIL_TRADES = 5;     // how many failed placements before backoff
+
+
+  // ================== STATE TRACKERS ==================
+  let badCycles = 0;
+  let failedTrades = 0;
+
+  // helpers (local)
+  const getLastN = (sym: Pair, n: number) => (pairDigitsRef.current[sym] ?? []).slice(-n);
+
+  const freq10 = (list: number[]) => {
+    const f = Array.from({ length: 10 }, () => 0);
+    for (const x of list) f[x]++;
+    return f;
+  };
+
+  const pctOfDigit = (list: number[], d: number) => {
+    if (!list.length) return 100;
+    let c = 0;
+    for (const x of list) if (x === d) c++;
+    return (c / list.length) * 100;
+  };
+
+  const pickLeastFrequentDigit = (list: number[]) => {
+    const f = freq10(list);
+    const n = list.length;
+    let bestDigit = 0;
+    let bestPct = Infinity;
+
+    for (let d = 0; d <= 9; d++) {
+      const p = n ? (f[d] / n) * 100 : 100;
+      if (p < bestPct) {
+        bestPct = p;
+        bestDigit = d;
+      }
+    }
+
+    return { digit: bestDigit, matchPct: bestPct, f, n };
+  };
+
+  const countHits = (list: number[], d: number) => {
+    let c = 0;
+    for (const x of list) if (x === d) c++;
+    return c;
+  };
+
+  const estimatedDiffersWin = (matchPct: number) => Math.max(0, Math.min(100, 100 - matchPct));
+  const decideDurationTicks = (pair: Pair) => (pair.startsWith("1HZ") ? 1 : 2);
+
+  // ✅ Keep this — and now we will actually USE it.
+  const hardDisconnect = () => {
+    try {
+      wsRef.current?.close();
+    } catch {}
+    wsRef.current = null;
+    setConnected(false);
+    setBalance(null);
+    authorizedRef.current = false;
+  };
+
+  // basic “can trade” guard
+  const ensureLive = () => {
+    const ws = wsRef.current;
+    return !!ws && ws.readyState === WebSocket.OPEN && authorizedRef.current;
+  };
+
+  try {
+    setAnalysisStatus(
+      "Metro started: scanning all pairs for STRONG + STABLE least-frequent digits..."
+    );
+
+    while (!metroCancelRef.current) {
+      if (!ensureLive()) break;
+
+      // find best candidate across all pairs
+      let best:
+        | null
+        | {
+            pair: Pair;
+            digit: number;
+            matchPctLong: number;
+            matchPctRecent: number;
+            last10Hits: number;
+            last20Hits: number;
+            score: number;
+            estWin: number;
+          } = null;
+
+      for (const pair of PAIRS) {
+        if (metroCancelRef.current) break;
+
+        // cooldown per pair
+        const lastAt = metroLastTradeAtRef.current[pair] ?? 0;
+        if (Date.now() - lastAt < COOLDOWN_MS) continue;
+
+        const longSample = getLastN(pair, SAMPLE_N);
+        if (longSample.length < MIN_SAMPLE) continue;
+
+        const recentSample = getLastN(pair, RECENT_N);
+        const last10 = getLastN(pair, 10);
+        const last20 = getLastN(pair, 20);
+
+        const pickLong = pickLeastFrequentDigit(longSample);
+        const d = pickLong.digit;
+
+        const matchPctLong = pickLong.matchPct;
+        const matchPctRecent = pctOfDigit(recentSample, d);
+
+        // HARD filters (accuracy)
+        if (matchPctLong > MAX_MATCH_PCT) continue;
+        if (matchPctRecent > MAX_RECENT_PCT) continue;
+
+        const last10Hits = countHits(last10, d);
+        const last20Hits = countHits(last20, d);
+
+        if (last10Hits > MAX_LAST10_HITS) continue;
+        if (last20Hits > MAX_LAST20_HITS) continue;
+
+        // score (bigger = better)
+        // prefer: lower long pct, low recent pct, low recent hits
+        const score =
+          (MAX_MATCH_PCT - matchPctLong) * 2 +
+          (MAX_RECENT_PCT - matchPctRecent) * 2 +
+          (MAX_LAST20_HITS - last20Hits) * 1.2 +
+          (MAX_LAST10_HITS - last10Hits) * 1.5;
+
+        const estWin = estimatedDiffersWin(matchPctLong);
+
+        if (!best || score > best.score) {
+          best = {
+            pair,
+            digit: d,
+            matchPctLong,
+            matchPctRecent,
+            last10Hits,
+            last20Hits,
+            score,
+            estWin,
+          };
+        }
+      }
+
+      if (!best) {
+        badCycles++;
+        setAnalysisStatus(
+          `Metro: no STRONG signals right now. (badCycles ${badCycles}/${MAX_BAD_CYCLES})`
+        );
+
+        // ✅ HARD DISCONNECT TRIGGER #1
+        // If we keep failing to find any quality signal for too long, disconnect.
+        if (badCycles >= MAX_BAD_CYCLES) {
+  // ✅ Instead of disconnecting, just back off and keep scanning
+  setAnalysisStatus("Metro: no stable edge right now. Skipping trades and waiting...");
+  badCycles = 0;                 // reset so it doesn't spam this message forever
+  await sleep(4000);             // longer cooldown when conditions are bad
+  continue;                      // keep loop alive
+}
+
+        await sleep(LOOP_DELAY_MS);
+        continue;
+      }
+
+      // reset bad cycles if we found a real candidate
+      badCycles = 0;
+
+      const durationTicks = decideDurationTicks(best.pair);
+
+      setAnalysisStatus(
+        `Metro: ${best.pair} • DIFFERS ${best.digit} • long ${best.matchPctLong.toFixed(
+          2
+        )}% • recent ${best.matchPctRecent.toFixed(2)}% • last10Hits ${best.last10Hits} • ${durationTicks}t`
+      );
+
+      // place trade (DIFFERS only) with source Metro
+      try {
+        await placeDiffersInstant(best.pair, best.digit, 1, {
+          durationTicks,
+          source: "Metro",
+        });
+
+        metroLastTradeAtRef.current[best.pair] = Date.now();
+      } catch {
+        failedTrades++;
+        setAnalysisStatus(
+          `Metro: trade failed (${failedTrades}/${MAX_FAIL_TRADES}).`
+        );
+
+        // ✅ HARD DISCONNECT TRIGGER #2
+        // If trade placement is repeatedly failing, disconnect.
+        if (failedTrades >= MAX_FAIL_TRADES) {
+  // ✅ Instead of disconnecting, pause and keep trying later
+  setAnalysisStatus("Metro: repeated trade failures. Skipping and retrying later...");
+  failedTrades = 0;              // reset after a cool-off
+  await sleep(5000);             // backoff to avoid hammering requests
+  continue;
+}
+      }
+
+      await sleep(LOOP_DELAY_MS);
+    }
+  } finally {
+    metroLoopRef.current = false;
+    metroCancelRef.current = false;
+    setMetroRunning(false);
+
+    // only show "stopped" if not disconnected by safety
+    if (wsRef.current) setAnalysisStatus("Metro stopped.");
   }
 };
 
@@ -1531,7 +2168,11 @@ const toggleSpiderRandomAuto = async () => {
             </div>
             <div className="bg-[#13233d]/80 backdrop-blur rounded-2xl p-6 border border-white/10 shadow-[0_0_0_1px_rgba(255,255,255,0.06)]">
   <h2 className="font-semibold mb-4 text-white/85 tracking-tight">Market / Timing</h2>
-  <MarketIndicator activeStrategy={activeStrategy} selectedPair={selectedPair} />
+  <MarketIndicator
+  activeStrategy={activeStrategy}
+  selectedPair={selectedPair}
+  pairDigitsRef={pairDigitsRef}
+/>
 </div>
             <div className="bg-[#13233d]/80 backdrop-blur rounded-2xl p-6 border border-white/10 shadow-[0_0_0_1px_rgba(255,255,255,0.06)]">
               <h2 className="font-semibold mb-4 text-white/85 tracking-tight">Trading Strategies</h2>
@@ -1600,6 +2241,8 @@ onClearHistory={() => setTradeHistory([])}
                 fastAutoRunning={fastAutoRunning} 
                 uiFlags={uiFlags}
                 isAdmin={isAdmin}
+                onToggleMetro={toggleMetroAuto}
+                metroRunning={metroRunning}
               />
             )}
 
@@ -1729,6 +2372,8 @@ function MetroXPanel({
   fastAutoRunning,
   uiFlags,
   isAdmin,
+    onToggleMetro,
+  metroRunning,
 }: {
   ticks: number[];
   pipSize: number;
@@ -1772,6 +2417,9 @@ function MetroXPanel({
 
   tradeHistory: Trade[];
   onClearHistory: () => void;
+
+    onToggleMetro: () => void;
+  metroRunning: boolean;
 
   currency: string;
 
@@ -2307,6 +2955,20 @@ const canShow = (key: keyof UIFlags) => isAdmin || uiFlags[key] !== false;
         </select>
       </div>
     </div>
+  )}
+
+    {/* ✅ METRO (NEW) — AutoTrade toggle */}
+  {canShow("metro_metro") && (
+    <button
+      onClick={onToggleMetro}
+      className={`w-full rounded-md py-3 text-sm font-semibold shadow-[0_0_0_1px_rgba(255,255,255,0.10)] transition active:scale-[0.98] ${
+        metroRunning
+          ? "bg-teal-600 hover:bg-teal-700 animate-pulse"
+          : "bg-teal-500 hover:bg-teal-600"
+      }`}
+    >
+      {metroRunning ? "Stop Metro" : "Metro"}
+    </button>
   )}
 
   {/* ✅ 3x Selected Digit */}
