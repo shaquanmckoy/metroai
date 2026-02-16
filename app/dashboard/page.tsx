@@ -1015,6 +1015,7 @@ const resetPairNow = (p: Pair) => {
 
   const connectDeriv = () => {
     if (!token) return alert("Please enter your Deriv API token");
+    localStorage.setItem("deriv_token", token);
 
     try {
       wsRef.current?.close();
@@ -1217,6 +1218,7 @@ pairDigitsRef.current[symbol] = next;
     disconnect();
     localStorage.clear();
     router.replace("/");
+    localStorage.removeItem("deriv_token");
   };
 
   /* ================= TRADE PLACEMENT ================= */
@@ -2093,7 +2095,7 @@ const toggleSpiderRandomAuto = async () => {
             )}
 
             <button>Analyzer</button>
-            <button>Auto Trader</button>
+            <button onClick={() => router.push("/dashboard/chart")}>MT5</button>
             <button onClick={logout} className="hover:text-red-400">
               Logout
             </button>
@@ -2112,11 +2114,16 @@ const toggleSpiderRandomAuto = async () => {
             {!connected ? (
               <div className="flex gap-2">
                 <input
-                  type="password"
-                  placeholder="Deriv API Token"
-                  className="bg-black/40 px-3 py-2 rounded-md border border-white/10"
-                  onChange={(e) => setToken(e.target.value)}
-                />
+  type="password"
+  placeholder="Deriv API Token"
+  className="bg-black/40 px-3 py-2 rounded-md border border-white/10"
+  value={token}
+  onChange={(e) => {
+    const v = e.target.value;
+    setToken(v);
+    localStorage.setItem("deriv_token", v); // ✅ makes it available to MT5 dashboard
+  }}
+/>
                 <button
                   onClick={connectDeriv}
                   className="bg-indigo-500 px-4 py-2 rounded-md text-sm shadow-[0_0_0_1px_rgba(255,255,255,0.10)]"
