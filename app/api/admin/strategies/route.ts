@@ -11,7 +11,7 @@ const pool = new Pool({
 
 const KEY = "strategy_flags";
 
-const DEFAULT_FLAGS = { matches: true, overunder: true };
+const DEFAULT_FLAGS = { matches: true, overunder: true, risefall: true };
 
 export async function GET() {
   try {
@@ -26,11 +26,15 @@ export async function GET() {
     const flags = {
       matches: typeof value.matches === "boolean" ? value.matches : true,
       overunder: typeof value.overunder === "boolean" ? value.overunder : true,
+      risefall: typeof value.risefall === "boolean" ? value.risefall : true,
     };
 
     return NextResponse.json({ ok: true, flags });
   } catch {
-    return NextResponse.json({ ok: false, error: "Failed to load strategy flags" }, { status: 500 });
+    return NextResponse.json(
+      { ok: false, error: "Failed to load strategy flags" },
+      { status: 500 }
+    );
   }
 }
 
@@ -38,12 +42,13 @@ export async function POST(req: Request) {
   try {
     const body = await req.json();
 
-    // accept {flags:{...}} OR {matches, overunder}
+    // accept {flags:{...}} OR {matches, overunder, risefall}
     const src = body?.flags ?? body;
 
     const flags = {
       matches: !!src?.matches,
       overunder: !!src?.overunder,
+      risefall: !!src?.risefall,
     };
 
     await pool.query(
@@ -58,6 +63,9 @@ export async function POST(req: Request) {
 
     return NextResponse.json({ ok: true, flags });
   } catch {
-    return NextResponse.json({ ok: false, error: "Failed to save strategy flags" }, { status: 500 });
+    return NextResponse.json(
+      { ok: false, error: "Failed to save strategy flags" },
+      { status: 500 }
+    );
   }
 }

@@ -35,10 +35,18 @@ export const INDEX_GROUPS = {
     { code: "RDBEAR", label: "Bear Market Index" },
     { code: "RDBULL", label: "Bull Market Index" },
   ],
+
+  Step: [
+    { code: "STPRNG", label: "STEP INDEX 100" },
+    { code: "STPRNG2", label: "STEP INDEX 200" },
+    { code: "STPRNG3", label: "STEP INDEX 300" },
+    { code: "STPRNG4", label: "STEP INDEX 500" },
+    { code: "STPRNG5", label: "STEP INDEX 1000" },
+  ],
 };
 
-export const PAIRS = [
-  // 🚀 Volatility
+export const METRO_SPIDER_PAIRS = [
+  // Volatility
   "R_10",
   "R_25",
   "R_50",
@@ -53,7 +61,7 @@ export const PAIRS = [
   "1HZ90V",
   "1HZ100V",
 
-  // 🚀 Jump
+  // Jump
   "JD10",
   "JD25",
   "JD50",
@@ -62,6 +70,23 @@ export const PAIRS = [
   "RDBEAR",
   "RDBULL",
 ] as const;
+
+export const RISE_FALL_PAIRS = [
+  ...METRO_SPIDER_PAIRS,
+
+  // Step (Rise/Fall only)
+  "STPRNG",
+  "STPRNG2",
+  "STPRNG3",
+  "STPRNG4",
+  "STPRNG5",
+] as const;
+
+export const STEP_ONLY_PAIRS = RISE_FALL_PAIRS.filter(
+  (p) => !METRO_SPIDER_PAIRS.includes(p as (typeof METRO_SPIDER_PAIRS)[number])
+) as readonly Pair[];
+
+export const PAIRS = RISE_FALL_PAIRS;
 
 export type Pair = (typeof PAIRS)[number];
 
@@ -102,6 +127,11 @@ const CONTRACT_TYPE_MAP: Record<TradeType, string> = {
   Rise: "CALL",
   Fall: "PUT",
 };
+function getContractType(type: TradeType, allowEquals: boolean) {
+  if (type === "Rise") return allowEquals ? "CALLE" : "CALL";
+  if (type === "Fall") return allowEquals ? "PUTE" : "PUT";
+  return CONTRACT_TYPE_MAP[type];
+}
 
 function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
@@ -829,6 +859,7 @@ useEffect(() => {
   const [mdTradeType, setMdTradeType] = useState<"Differs" | "Matches">("Differs");
   const [mdTickDuration, setMdTickDuration] = useState<number>(1);
   const [rfTickDuration, setRfTickDuration] = useState<number>(5);
+  const [rfAllowEquals, setRfAllowEquals] = useState(false);
 
   const [tradeHistory, setTradeHistory] = useState<Trade[]>([]);
 
@@ -966,8 +997,8 @@ const runBuyWorker = async () => {
     return { digit: bestDigit, percent: bestPct };
   };
 
-  const subscribeAllPairs = () => {
-  PAIRS.forEach((sym) => {
+  const subscribeAllPairs = (pairs: readonly Pair[]) => {
+  pairs.forEach((sym) => {
     safeSend({ ticks: sym, subscribe: 1 });
   });
 };
@@ -1075,6 +1106,11 @@ const resetPairNow = (p: Pair) => {
       if (data?.error?.message) {
   const msg: string = data.error.message;
   const req_id: number | undefined = data.req_id;
+  const echo = data.echo_req ?? {};
+  const tickSymbol = typeof echo.ticks === "string" ? echo.ticks : null;
+  const isStepOnlySymbol = !!tickSymbol && STEP_ONLY_PAIRS.includes(tickSymbol as Pair);
+  const isInvalidSymbolError = /symbol .* invalid/i.test(msg);
+  const isAlreadySubscribedError = /already subscribed/i.test(msg);
 
   // If a waiter exists, always reject it (turbo or not)
   if (req_id && buyAckWaitersRef.current[req_id]) {
@@ -1085,8 +1121,14 @@ const resetPairNow = (p: Pair) => {
   // Turbo: do NOT alert (but we did reject waiters so queue doesn't hang)
   if (req_id && reqInfoRef.current[req_id]?.turbo) return;
 
-  alert(msg);
-  return;
+  // Ignore popup alerts for invalid Step-index subscriptions
+if (isInvalidSymbolError && isStepOnlySymbol) return;
+
+// Ignore harmless duplicate tick subscriptions (R_10 already subscribed)
+if (isAlreadySubscribedError && tickSymbol) return;
+
+alert(msg);
+return;
 }
 
       if (data.msg_type === "authorize") {
@@ -1094,7 +1136,7 @@ const resetPairNow = (p: Pair) => {
         setConnected(true);
 
         safeSend({ balance: 1, subscribe: 1 });
-        subscribeAllPairs();
+        subscribeAllPairs(METRO_SPIDER_PAIRS);
       }
 
       if (data.msg_type === "balance") {
@@ -1281,15 +1323,6 @@ pairQuotesRef.current[symbol] = nextQuotes;
 
   const req_id = newReqId();
 
-const placeRiseFallDoubleTrade = (durationTicks: number) => {
-  if (!stake || stake <= 0) return alert("Enter a stake amount");
-  if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return alert("WebSocket not connected yet");
-  if (!authorizedRef.current) return alert("Not authorized yet");
-
-  placeTrade("Rise", durationTicks);
-  placeTrade("Fall", durationTicks);
-};
-
   const src: Trade["source"] =
     activeStrategy === "overunder" ? "SpiderX Auto" : activeStrategy === "risefall" ? "Metro" : "MetroX";
 
@@ -1315,7 +1348,7 @@ const placeRiseFallDoubleTrade = (durationTicks: number) => {
     proposal: 1,
     amount: stake,
     basis: "stake",
-    contract_type: CONTRACT_TYPE_MAP[type],
+    contract_type: getContractType(type, rfAllowEquals),
     currency: currency || "USD",
     symbol: selectedPair,
     duration: durationTicks,
@@ -2069,6 +2102,14 @@ const toggleSpiderRandomAuto = async () => {
 
   // remount MetroX panel when strategy changes
   useEffect(() => {
+  if (!connected) return;
+  if (activeStrategy !== "risefall") return;
+  if (!selectedPair) return;
+
+  // Only subscribe to the currently selected Rise/Fall pair
+  safeSend({ ticks: selectedPair, subscribe: 1 });
+}, [activeStrategy, connected, selectedPair]);
+  useEffect(() => {
   setMetroXResetKey((k) => k + 1);
 
   if (activeStrategy !== "matches") {
@@ -2273,56 +2314,56 @@ const toggleSpiderRandomAuto = async () => {
 
           {/* RIGHT */}
           <div className="rounded-2xl p-0 border border-white/10 overflow-hidden shadow-[0_0_0_1px_rgba(255,255,255,0.06)]">
-            {activeStrategy === "matches" && isStrategyEnabledForViewer("matches") && (
-              <MetroXPanel
-                key={metroXResetKey}
-                ticks={ticks}
-                pipSize={pipSize}
-                stake={stake}
-                setStake={setStake}
-                selectedDigit={selectedDigit}
-                setSelectedDigit={setSelectedDigit}
-                selectedPair={selectedPair}
-                setSelectedPair={(p: Pair) => {
-  resetPairNow(p);
-  setSelectedPair(p);
-}}
-                mdTradeType={mdTradeType}
-                setMdTradeType={setMdTradeType}
-                mdTickDuration={mdTickDuration}
-                setMdTickDuration={setMdTickDuration}
-                onPlaceMetroX={() => placeTrade(mdTradeType, mdTickDuration)}
-                on3xSelectedDigit={place3xSelectedDigit}
-                placeTradeFor={placeTradeFor}
-                instant3xRunning={instant3xRunning}
-                turboMode={turboMode}
-                setTurboMode={setTurboMode}
-                onToggle5x={toggle5xAutoTrading}
-                auto5xRunning={auto5xRunning}
-                analysisStatus={analysisStatus}
-                analysisOpen={analysisOpen}
-                setAnalysisOpen={setAnalysisOpen}
-                lastWinDigit={lastWinDigit}
-                lastLossDigit={lastLossDigit}
-                pairMeta={pairMeta}
-                tradeHistory={tradeHistory}
-onClearHistory={() => setTradeHistory([])}
-                currency={currency}
-                run1xAutoAllPairs={run1xAutoAllPairs}
-                auto1xRunning={auto1xRunning}
-                onToggleFastAuto={toggleFastAutoTrading}
-                fastAutoRunning={fastAutoRunning} 
-                uiFlags={uiFlags}
-                isAdmin={isAdmin}
-                onToggleMetro={toggleMetroAuto}
-                metroRunning={metroRunning}
-              />
-            )}
+{activeStrategy === "matches" && isStrategyEnabledForViewer("matches") && (
+  <MetroXPanel
+    key={metroXResetKey}
+    ticks={ticks}
+    pipSize={pipSize}
+    stake={stake}
+    setStake={setStake}
+    selectedDigit={selectedDigit}
+    setSelectedDigit={setSelectedDigit}
+    selectedPair={selectedPair}
+    setSelectedPair={(p: Pair) => {
+      resetPairNow(p);
+      setSelectedPair(p);
+    }}
+    mdTradeType={mdTradeType}
+    setMdTradeType={setMdTradeType}
+    mdTickDuration={mdTickDuration}
+    setMdTickDuration={setMdTickDuration}
+    onPlaceMetroX={() => placeTrade(mdTradeType, mdTickDuration)}
+    on3xSelectedDigit={place3xSelectedDigit}
+    placeTradeFor={placeTradeFor}
+    instant3xRunning={instant3xRunning}
+    turboMode={turboMode}
+    setTurboMode={setTurboMode}
+    onToggle5x={toggle5xAutoTrading}
+    auto5xRunning={auto5xRunning}
+    analysisStatus={analysisStatus}
+    analysisOpen={analysisOpen}
+    setAnalysisOpen={setAnalysisOpen}
+    lastWinDigit={lastWinDigit}
+    lastLossDigit={lastLossDigit}
+    pairMeta={pairMeta}
+    tradeHistory={tradeHistory}
+    onClearHistory={() => setTradeHistory([])}
+    currency={currency}
+    run1xAutoAllPairs={run1xAutoAllPairs}
+    auto1xRunning={auto1xRunning}
+    onToggleFastAuto={toggleFastAutoTrading}
+    fastAutoRunning={fastAutoRunning} 
+    uiFlags={uiFlags}
+    isAdmin={isAdmin}
+    onToggleMetro={toggleMetroAuto}
+    metroRunning={metroRunning}
+  />
+)}
 
             {activeStrategy === "overunder" && isStrategyEnabledForViewer("overunder") && (
   <div className="bg-[#13233d] p-6 flex flex-col min-h-[520px]">
    <SpiderXAnalyzer
-  pairs={PAIRS}
+  pairs={METRO_SPIDER_PAIRS}
   indexGroups={INDEX_GROUPS}
   pairDigitsRef={pairDigitsRef}
   selectedPair={selectedPair}
@@ -2352,22 +2393,25 @@ onClearHistory={() => setTradeHistory([])}
 {activeStrategy === "risefall" && isStrategyEnabledForViewer("risefall") && (
   <div className="bg-[#13233d] p-6 flex flex-col min-h-[520px]">
     <RiseFallPanel
-      selectedPair={selectedPair}
-      setSelectedPair={(p: Pair) => {
-        resetPairNow(p);
-        setSelectedPair(p);
-      }}
-      stake={stake}
-      setStake={setStake}
-      rfTickDuration={rfTickDuration}
-      setRfTickDuration={setRfTickDuration}
-      onPlaceTrade={(type: "Rise" | "Fall", duration: number) => placeTrade(type, duration)}
-      onPlaceDoubleTrade={(duration: number) => placeRiseFallDoubleTrade(duration)}
-      currency={currency}
-      tradeHistory={tradeHistory}
-      onClearHistory={() => setTradeHistory([])}
-      pairQuotesRef={pairQuotesRef}
-    />
+  selectedPair={selectedPair}
+  availablePairs={RISE_FALL_PAIRS}
+  setSelectedPair={(p: Pair) => {
+    resetPairNow(p);
+    setSelectedPair(p);
+  }}
+  stake={stake}
+  setStake={setStake}
+  rfTickDuration={rfTickDuration}
+  setRfTickDuration={setRfTickDuration}
+  rfAllowEquals={rfAllowEquals}
+  setRfAllowEquals={setRfAllowEquals}
+  onPlaceTrade={(type: "Rise" | "Fall", duration: number) => placeTrade(type, duration)}
+  onPlaceDoubleTrade={(duration: number) => placeRiseFallDoubleTrade(duration)}
+  currency={currency}
+  tradeHistory={tradeHistory}
+  onClearHistory={() => setTradeHistory([])}
+  pairQuotesRef={pairQuotesRef}
+/>
   </div>
 )}
 
@@ -2441,49 +2485,52 @@ function StrategyTradeHistoryTab({
   onClearHistory: () => void;
 }) {
   return (
-    <div className="mt-6 bg-black/20 border border-white/10 rounded-xl p-4">
-      <div className="flex items-center justify-between gap-3">
+    <div className="bg-black/30 rounded-xl p-4 border border-white/10 mt-6">
+      <div className="flex items-center justify-between mb-3">
         <div>
           <p className="text-sm font-semibold text-white/85">{title}</p>
-          <p className="text-[11px] text-white/50 mt-1">Same shared history layout used for strategy panels</p>
+          <p className="text-[11px] text-white/50 mt-1">Recent trades for this strategy</p>
         </div>
-        <div className="flex items-center gap-2">
-          <p className="text-[11px] text-white/50">Showing last 20</p>
-          <button
-            onClick={onClearHistory}
-            className="text-xs px-3 py-1 rounded-md border border-white/10 bg-black/20 text-white/70 hover:text-white"
-          >
-            Clear History
-          </button>
-        </div>
+        <button
+          onClick={onClearHistory}
+          className="text-xs px-3 py-1 rounded-md border border-white/10 bg-black/20 text-white/70 hover:text-white"
+        >
+          Clear History
+        </button>
       </div>
 
-      <div className="mt-3 overflow-x-auto">
+      <div className="space-y-2 max-h-[320px] overflow-y-auto pr-1">
         {trades.length === 0 ? (
           <p className="text-[11px] text-white/55">No trades yet.</p>
         ) : (
-          <table className="w-full text-[11px] text-left border-separate border-spacing-y-2">
-            <thead>
-              <tr className="text-white/45">
-                <th className="font-medium">Time</th>
-                <th className="font-medium">Pair</th>
-                <th className="font-medium">Type</th>
-                <th className="font-medium">Stake</th>
-                <th className="font-medium">Duration</th>
-                <th className="font-medium">Result</th>
-                <th className="font-medium">P/L</th>
-              </tr>
-            </thead>
-            <tbody>
-              {trades.slice(0, 20).map((t) => (
-                <tr key={t.id} className="bg-black/30 border border-white/10">
-                  <td className="rounded-l-lg px-3 py-2 text-white/70">{new Date(t.createdAt).toLocaleTimeString()}</td>
-                  <td className="px-3 py-2 text-white/80 font-semibold">{t.symbol}</td>
-                  <td className="px-3 py-2 text-white/75">{t.type}</td>
-                  <td className="px-3 py-2 text-white/70">{Number(t.stake).toFixed(2)} {currency}</td>
-                  <td className="px-3 py-2 text-white/70">{t.durationTicks}t</td>
-                  <td
-                    className={`px-3 py-2 font-semibold ${
+          trades.slice(0, 20).map((t) => (
+            <div
+              key={t.id}
+              className="bg-black/20 border border-white/10 rounded-lg px-3 py-3"
+            >
+              <div className="flex items-center justify-between gap-3 text-[11px]">
+                <span className="text-white/55">{new Date(t.createdAt).toLocaleTimeString()}</span>
+                <span className="text-white/80 font-semibold">{t.symbol}</span>
+                <span className="text-white/70">{t.type}</span>
+              </div>
+
+              <div className="mt-2 grid grid-cols-2 md:grid-cols-4 gap-2 text-[11px]">
+                <div className="rounded-md bg-black/20 border border-white/10 px-2 py-2">
+                  <p className="text-white/45">Stake</p>
+                  <p className="text-white/80 font-medium">
+                    {Number(t.stake).toFixed(2)} {currency}
+                  </p>
+                </div>
+
+                <div className="rounded-md bg-black/20 border border-white/10 px-2 py-2">
+                  <p className="text-white/45">Duration</p>
+                  <p className="text-white/80 font-medium">{t.durationTicks}t</p>
+                </div>
+
+                <div className="rounded-md bg-black/20 border border-white/10 px-2 py-2">
+                  <p className="text-white/45">Result</p>
+                  <p
+                    className={`font-semibold ${
                       t.result === "Win"
                         ? "text-emerald-300"
                         : t.result === "Loss"
@@ -2492,16 +2539,28 @@ function StrategyTradeHistoryTab({
                     }`}
                   >
                     {t.result}
-                  </td>
-                  <td className="rounded-r-lg px-3 py-2 text-white/70">
+                  </p>
+                </div>
+
+                <div className="rounded-md bg-black/20 border border-white/10 px-2 py-2">
+                  <p className="text-white/45">P/L</p>
+                  <p
+                    className={`font-semibold ${
+                      typeof t.profit === "number"
+                        ? t.profit >= 0
+                          ? "text-emerald-300"
+                          : "text-red-300"
+                        : "text-white/70"
+                    }`}
+                  >
                     {typeof t.profit === "number"
                       ? `${t.profit >= 0 ? "+" : ""}${t.profit.toFixed(2)} ${currency}`
                       : "—"}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+                  </p>
+                </div>
+              </div>
+            </div>
+          ))
         )}
       </div>
     </div>
@@ -2512,11 +2571,14 @@ function StrategyTradeHistoryTab({
 
 function RiseFallPanel({
   selectedPair,
+  availablePairs,
   setSelectedPair,
   stake,
   setStake,
   rfTickDuration,
   setRfTickDuration,
+  rfAllowEquals,
+  setRfAllowEquals,
   onPlaceTrade,
   onPlaceDoubleTrade,
   currency,
@@ -2525,11 +2587,14 @@ function RiseFallPanel({
   pairQuotesRef,
 }: {
   selectedPair: Pair;
-  setSelectedPair: (p: Pair) => void;
-  stake: number;
-  setStake: (n: number) => void;
-  rfTickDuration: number;
-  setRfTickDuration: (n: number) => void;
+  availablePairs: readonly Pair[];
+setSelectedPair: (p: Pair) => void;
+stake: number;
+setStake: (n: number) => void;
+rfTickDuration: number;
+setRfTickDuration: (n: number) => void;
+rfAllowEquals: boolean;
+setRfAllowEquals: React.Dispatch<React.SetStateAction<boolean>>;
     onPlaceTrade: (type: "Rise" | "Fall", duration: number) => void;
   onPlaceDoubleTrade: (duration: number) => void;
   currency: string;
@@ -2614,7 +2679,7 @@ function RiseFallPanel({
               value={selectedPair}
               onChange={(e) => setSelectedPair(e.target.value as Pair)}
             >
-              {PAIRS.map((p) => (
+              {availablePairs.map((p) => (
                 <option key={p} value={p}>
                   {p}
                 </option>
@@ -2648,6 +2713,37 @@ function RiseFallPanel({
               onChange={(e) => setRfTickDuration(Math.max(1, Number(e.target.value) || 1))}
             />
             <p className="text-[11px] text-white/50 mt-2">Tip: use 3–10 ticks and wait for a clear trend before entering.</p>
+            <div className="bg-black/30 rounded-xl p-4 border border-white/10">
+  <p className="text-[11px] text-white/60 uppercase tracking-wide">Allow Equals</p>
+
+  <label className="mt-3 flex items-center justify-between gap-3 cursor-pointer">
+    <div>
+      <p className="text-sm font-semibold text-white/85">Allow Equals</p>
+      <p className="text-[11px] text-white/50 mt-1">
+        When enabled, equal exit/entry spots count as a win for Rise and Fall trades.
+      </p>
+    </div>
+
+    <button
+      type="button"
+      aria-pressed={rfAllowEquals}
+      onClick={() => setRfAllowEquals((v) => !v)}
+      className={`w-12 h-6 rounded-full relative transition ${
+        rfAllowEquals ? "bg-emerald-500" : "bg-white/15"
+      }`}
+    >
+      <span
+        className={`absolute top-0.5 w-5 h-5 bg-white rounded-full transition ${
+          rfAllowEquals ? "right-0.5" : "left-0.5"
+        }`}
+      />
+    </button>
+  </label>
+
+  <p className="text-[11px] text-sky-300 mt-3">
+    Current mode: {rfAllowEquals ? "ON — Allow Equals active" : "OFF — strict Rise/Fall only"}
+  </p>
+</div>
           </div>
 
           <div className="bg-black/30 rounded-xl p-4 border border-white/10">
@@ -2748,7 +2844,7 @@ function RiseFallPanel({
   </button>
 </div>
           <p className="text-[11px] text-white/50 mt-2">
-  Auto follows the live trend engine. Double Entry places both Rise and Fall at the same time using the same pair, stake, and tick duration.
+  Auto follows the live trend engine. Double Entry places both Rise and Fall at the same time using the same pair, stake, and tick duration. Allow Equals applies to Auto, Manual Rise, Manual Fall, and Double Entry.
 </p>
         </div>
 
@@ -3519,7 +3615,8 @@ function TradeHistoryMetroLike({
   const getIndexLabel = (sym: Pair) => {
     const vol = INDEX_GROUPS.volatility.find((x) => x.code === sym)?.label;
     const jump = INDEX_GROUPS.jump.find((x) => x.code === sym)?.label;
-    return vol || jump || sym;
+    const step = INDEX_GROUPS.Step.find((x) => x.code === sym)?.label;
+    return vol || jump || step || sym;
   };
 
   const pillForResult = (r: TradeResult) => {

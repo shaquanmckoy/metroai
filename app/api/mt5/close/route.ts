@@ -17,10 +17,12 @@ export async function POST(req: Request) {
 
   try {
     const account = await api.metatraderAccountApi.getAccount(accountId);
-    const connection = await account.connect();
-    await connection.waitSynchronized();
+const connection = account.getRPCConnection();
 
-    const result = await connection.closePosition(positionId);
+await connection.connect();
+await connection.waitSynchronized();
+
+const result = await connection.closePosition(positionId, {});
     return Response.json({ ok: true, result });
   } catch (e: any) {
     return Response.json({ ok: false, error: e?.message ?? "Close failed" }, { status: 500 });
