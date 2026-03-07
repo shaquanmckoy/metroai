@@ -66,7 +66,7 @@ export const PAIRS = [
 export type Pair = (typeof PAIRS)[number];
 
 type TradeResult = "Win" | "Loss" | "Pending";
-type TradeType = "Matches" | "Differs" | "Over" | "Under";
+type TradeType = "Matches" | "Differs" | "Over" | "Under" | "Rise" | "Fall";
 
 type Trade = {
  source?: "MetroX" | "Metro" | "SpiderX" | "SpiderX Auto" | "Edshell";
@@ -97,6 +97,10 @@ const CONTRACT_TYPE_MAP: Record<TradeType, string> = {
   Differs: "DIGITDIFF",
   Over: "DIGITOVER",
   Under: "DIGITUNDER",
+
+  // Rise/Fall
+  Rise: "CALL",
+  Fall: "PUT",
 };
 
 function sleep(ms: number) {
@@ -111,7 +115,7 @@ function MarketIndicator({
   selectedPair,
   pairDigitsRef,
 }: {
-  activeStrategy: "matches" | "overunder" | null;
+  activeStrategy: "matches" | "overunder" | "risefall" | null;
   selectedPair: Pair;
   pairDigitsRef: React.MutableRefObject<Record<Pair, number[]>>;
 }) {
@@ -277,7 +281,13 @@ const chiSquareUniform = (f: number[], n: number) => {
 
   // ===================== STRATEGY EDGE SCORE (NEW) =====================
   const stratName =
-    activeStrategy === "matches" ? "MetroX" : activeStrategy === "overunder" ? "SpiderX" : "No strategy selected";
+  activeStrategy === "matches"
+    ? "MetroX"
+    : activeStrategy === "overunder"
+    ? "SpiderX"
+    : activeStrategy === "risefall"
+    ? "Rise/Fall"
+    : "No strategy selected";
 
   // MetroX (DIFFERS edge): we want a *least frequent digit*, low pct, and NOT seen in last5
   const metroEdge = (() => {
@@ -590,12 +600,13 @@ if (riskLevel === "HIGH" && !sustainedHigh) {
  */
 const STRATEGY_FLAGS_KEY = "strategy_flags";
 
-type StrategyKey = "matches" | "overunder";
+type StrategyKey = "matches" | "overunder" | "risefall";
 type StrategyFlags = Record<StrategyKey, boolean>;
 
 const DEFAULT_FLAGS: StrategyFlags = {
   matches: true,
   overunder: true,
+  risefall: true,
 };
 const UI_FLAGS_KEY = "ui_flags";
 
@@ -654,6 +665,7 @@ function readStrategyFlags(): StrategyFlags {
     return {
       matches: typeof parsed.matches === "boolean" ? parsed.matches : true,
       overunder: typeof parsed.overunder === "boolean" ? parsed.overunder : true,
+      risefall: typeof parsed.risefall === "boolean" ? parsed.risefall : true,
     };
   } catch {
     return DEFAULT_FLAGS;
@@ -730,7 +742,7 @@ useEffect(() => {
 
   const wsRef = useRef<WebSocket | null>(null);
   const authorizedRef = useRef(false);
-  const activeStrategyRef = useRef<"matches" | "overunder" | null>(null);
+  const activeStrategyRef = useRef<"matches" | "overunder" | "risefall" | null>(null);
   const selectedPairRef = useRef<Pair>(PAIRS[0]);
   const lastEdshellAtRef = useRef(0);
   const [uiFlags, setUiFlags] = useState<UIFlags>(DEFAULT_UI_FLAGS);
@@ -740,6 +752,10 @@ useEffect(() => {
 
   // per-pair rolling digits cache
   const pairDigitsRef = useRef<Record<Pair, number[]>>(
+  Object.fromEntries(PAIRS.map((p) => [p, []])) as unknown as Record<Pair, number[]>
+);
+// per-pair rolling quote cache (used for Rise/Fall trend detection)
+const pairQuotesRef = useRef<Record<Pair, number[]>>(
   Object.fromEntries(PAIRS.map((p) => [p, []])) as unknown as Record<Pair, number[]>
 );
 
@@ -776,7 +792,7 @@ const lastAuto1xPairRef = useRef<Pair | null>(null);
 
   const [ticks, setTicks] = useState<number[]>([]);
 
-  const [activeStrategy, setActiveStrategy] = useState<"matches" | "overunder" | null>(null);
+  const [activeStrategy, setActiveStrategy] = useState<"matches" | "overunder" | "risefall" | null>(null);
 useEffect(() => {
   activeStrategyRef.current = activeStrategy;
 }, [activeStrategy]);
@@ -812,6 +828,7 @@ useEffect(() => {
   // MetroX controls
   const [mdTradeType, setMdTradeType] = useState<"Differs" | "Matches">("Differs");
   const [mdTickDuration, setMdTickDuration] = useState<number>(1);
+  const [rfTickDuration, setRfTickDuration] = useState<number>(5);
 
   const [tradeHistory, setTradeHistory] = useState<Trade[]>([]);
 
@@ -959,6 +976,9 @@ const resetPairNow = (p: Pair) => {
   pairDigitsRef.current = Object.fromEntries(
     PAIRS.map((x) => [x, []])
   ) as unknown as Record<Pair, number[]>;
+  pairQuotesRef.current = Object.fromEntries(
+  PAIRS.map((x) => [x, []])
+) as unknown as Record<Pair, number[]>;
 
   // wipe UI
   setTicks([]);
@@ -1028,6 +1048,7 @@ const resetPairNow = (p: Pair) => {
     reqInfoRef.current = {};
 
    pairDigitsRef.current = Object.fromEntries(PAIRS.map((p) => [p, []])) as unknown as Record<Pair, number[]>;
+   pairQuotesRef.current = Object.fromEntries(PAIRS.map((p) => [p, []])) as unknown as Record<Pair, number[]>;
     setPairMeta(
   Object.fromEntries(PAIRS.map((p) => [p, { count: 0 }])) as unknown as Record<
     Pair,
@@ -1089,18 +1110,24 @@ const resetPairNow = (p: Pair) => {
 if (
   activeStrategyRef.current !== "matches" &&
   activeStrategyRef.current !== "overunder" &&
+  activeStrategyRef.current !== "risefall" &&
   !metroLoopRef.current
 ) return;
 
   const ps = typeof data.tick.pip_size === "number" ? data.tick.pip_size : pipSize;
   if (typeof data.tick.pip_size === "number") setPipSize(ps);
 
-  const digit = getLastDigit(Number(data.tick.quote), ps);
+  const quote = Number(data.tick.quote);
+const digit = getLastDigit(quote, ps);
 
-  const prev = pairDigitsRef.current[symbol] ?? [];
-const next = [...prev, digit]; // ❌ no cap anymore
+const prev = pairDigitsRef.current[symbol] ?? [];
+const next = [...prev, digit];
 pairDigitsRef.current[symbol] = next;
 
+// store quotes for Rise/Fall trend detection
+const prevQuotes = pairQuotesRef.current[symbol] ?? [];
+const nextQuotes = [...prevQuotes, quote].slice(-400);
+pairQuotesRef.current[symbol] = nextQuotes;
   const last20 = next.slice(-20);
   if (last20.length >= 20) {
     const low = lowestDigitFromList(last20);
@@ -1243,43 +1270,71 @@ pairDigitsRef.current[symbol] = next;
     batchStartIndex: 1,
   });
 };
-  const placeTrade = (type: TradeType, durationTicks: number) => {
-    if (selectedDigit === null) return alert("Select a digit first");
-    if (!stake || stake <= 0) return alert("Enter a stake amount");
-    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return alert("WebSocket not connected yet");
-    if (!authorizedRef.current) return alert("Not authorized yet");
+ const placeTrade = (type: TradeType, durationTicks: number) => {
+  const needsDigit =
+    type === "Matches" || type === "Differs" || type === "Over" || type === "Under";
 
-    const req_id = newReqId();
+  if (needsDigit && selectedDigit === null) return alert("Select a digit first");
+  if (!stake || stake <= 0) return alert("Enter a stake amount");
+  if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return alert("WebSocket not connected yet");
+  if (!authorizedRef.current) return alert("Not authorized yet");
 
-   const trade: Trade = {
-  id: req_id,
-  symbol: selectedPair,
-  digit: selectedDigit,
-  type,
-  stake,
-  durationTicks,
-  result: "Pending",
-  createdAt: Date.now(),
-  source: activeStrategy === "overunder" ? "SpiderX Auto" : "MetroX",
+  const req_id = newReqId();
+
+const placeRiseFallDoubleTrade = (durationTicks: number) => {
+  if (!stake || stake <= 0) return alert("Enter a stake amount");
+  if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return alert("WebSocket not connected yet");
+  if (!authorizedRef.current) return alert("Not authorized yet");
+
+  placeTrade("Rise", durationTicks);
+  placeTrade("Fall", durationTicks);
 };
 
-    setTradeHistory((prev) => [trade, ...prev]);
+  const src: Trade["source"] =
+    activeStrategy === "overunder" ? "SpiderX Auto" : activeStrategy === "risefall" ? "Metro" : "MetroX";
 
-    reqInfoRef.current[req_id] = { symbol: selectedPair, digit: selectedDigit, type, stake };
+  const digitForTrade = needsDigit ? (selectedDigit as number) : 0;
 
-    safeSend({
-      proposal: 1,
-      amount: stake,
-      basis: "stake",
-      contract_type: CONTRACT_TYPE_MAP[type],
-      currency: currency || "USD",
-      symbol: selectedPair,
-      duration: durationTicks,
-      duration_unit: "t",
-      barrier: String(selectedDigit),
-      req_id,
-    });
+  const trade: Trade = {
+    id: req_id,
+    symbol: selectedPair,
+    digit: digitForTrade,
+    type,
+    stake,
+    durationTicks,
+    result: "Pending",
+    createdAt: Date.now(),
+    source: src,
   };
+
+  setTradeHistory((prev) => [trade, ...prev]);
+
+  reqInfoRef.current[req_id] = { symbol: selectedPair, digit: digitForTrade, type, stake };
+
+  const payload: any = {
+    proposal: 1,
+    amount: stake,
+    basis: "stake",
+    contract_type: CONTRACT_TYPE_MAP[type],
+    currency: currency || "USD",
+    symbol: selectedPair,
+    duration: durationTicks,
+    duration_unit: "t",
+    req_id,
+  };
+
+  if (needsDigit) payload.barrier = String(selectedDigit);
+
+  safeSend(payload);
+};
+const placeRiseFallDoubleTrade = (durationTicks: number) => {
+  if (!stake || stake <= 0) return alert("Enter a stake amount");
+  if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return alert("WebSocket not connected yet");
+  if (!authorizedRef.current) return alert("Not authorized yet");
+
+  placeTrade("Rise", durationTicks);
+  placeTrade("Fall", durationTicks);
+};
 
   // Place one DIFFERS trade for symbol+digit and wait for buy-ack (safe for fast bursts)
   // ⚡ Instant parallel DIFFERS (no waiting)
@@ -2005,11 +2060,12 @@ const toggleSpiderRandomAuto = async () => {
 
   // ✅ if admin disables a strategy while a USER is viewing it, close it (NEW)
   useEffect(() => {
-    if (isAdmin) return;
-    if (activeStrategy === "matches" && !isStrategyEnabledForViewer("matches")) setActiveStrategy(null);
-    if (activeStrategy === "overunder" && !isStrategyEnabledForViewer("overunder")) setActiveStrategy(null);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [strategyFlags, isAdmin]);
+  if (isAdmin) return;
+  if (activeStrategy === "matches" && !isStrategyEnabledForViewer("matches")) setActiveStrategy(null);
+  if (activeStrategy === "overunder" && !isStrategyEnabledForViewer("overunder")) setActiveStrategy(null);
+  if (activeStrategy === "risefall" && !isStrategyEnabledForViewer("risefall")) setActiveStrategy(null);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+}, [strategyFlags, isAdmin]);
 
   // remount MetroX panel when strategy changes
   useEffect(() => {
@@ -2202,6 +2258,16 @@ const toggleSpiderRandomAuto = async () => {
     onToggle={() => setActiveStrategy(activeStrategy === "overunder" ? null : "overunder")}
   />
 )}
+
+  {isStrategyEnabledForViewer("risefall") && (
+  <StrategyRow
+    title="Rise/Fall"
+    description="Rise/Fall Strategy"
+    active={activeStrategy === "risefall"}
+    onToggle={() => setActiveStrategy(activeStrategy === "risefall" ? null : "risefall")}
+  />
+)}
+
             </div>
           </div>
 
@@ -2283,6 +2349,27 @@ onClearHistory={() => setTradeHistory([])}
 />
   </div>
 )}
+{activeStrategy === "risefall" && isStrategyEnabledForViewer("risefall") && (
+  <div className="bg-[#13233d] p-6 flex flex-col min-h-[520px]">
+    <RiseFallPanel
+      selectedPair={selectedPair}
+      setSelectedPair={(p: Pair) => {
+        resetPairNow(p);
+        setSelectedPair(p);
+      }}
+      stake={stake}
+      setStake={setStake}
+      rfTickDuration={rfTickDuration}
+      setRfTickDuration={setRfTickDuration}
+      onPlaceTrade={(type: "Rise" | "Fall", duration: number) => placeTrade(type, duration)}
+      onPlaceDoubleTrade={(duration: number) => placeRiseFallDoubleTrade(duration)}
+      currency={currency}
+      tradeHistory={tradeHistory}
+      onClearHistory={() => setTradeHistory([])}
+      pairQuotesRef={pairQuotesRef}
+    />
+  </div>
+)}
 
             {/* ✅ if user selects a disabled strategy, show the default empty state */}
             {!activeStrategy && (
@@ -2336,6 +2423,342 @@ function StrategyRow({
           }`}
         />
       </button>
+    </div>
+  );
+}
+
+/* ================= Shared Strategy Trade History ================= */
+
+function StrategyTradeHistoryTab({
+  title,
+  trades,
+  currency,
+  onClearHistory,
+}: {
+  title: string;
+  trades: Trade[];
+  currency: string;
+  onClearHistory: () => void;
+}) {
+  return (
+    <div className="mt-6 bg-black/20 border border-white/10 rounded-xl p-4">
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <p className="text-sm font-semibold text-white/85">{title}</p>
+          <p className="text-[11px] text-white/50 mt-1">Same shared history layout used for strategy panels</p>
+        </div>
+        <div className="flex items-center gap-2">
+          <p className="text-[11px] text-white/50">Showing last 20</p>
+          <button
+            onClick={onClearHistory}
+            className="text-xs px-3 py-1 rounded-md border border-white/10 bg-black/20 text-white/70 hover:text-white"
+          >
+            Clear History
+          </button>
+        </div>
+      </div>
+
+      <div className="mt-3 overflow-x-auto">
+        {trades.length === 0 ? (
+          <p className="text-[11px] text-white/55">No trades yet.</p>
+        ) : (
+          <table className="w-full text-[11px] text-left border-separate border-spacing-y-2">
+            <thead>
+              <tr className="text-white/45">
+                <th className="font-medium">Time</th>
+                <th className="font-medium">Pair</th>
+                <th className="font-medium">Type</th>
+                <th className="font-medium">Stake</th>
+                <th className="font-medium">Duration</th>
+                <th className="font-medium">Result</th>
+                <th className="font-medium">P/L</th>
+              </tr>
+            </thead>
+            <tbody>
+              {trades.slice(0, 20).map((t) => (
+                <tr key={t.id} className="bg-black/30 border border-white/10">
+                  <td className="rounded-l-lg px-3 py-2 text-white/70">{new Date(t.createdAt).toLocaleTimeString()}</td>
+                  <td className="px-3 py-2 text-white/80 font-semibold">{t.symbol}</td>
+                  <td className="px-3 py-2 text-white/75">{t.type}</td>
+                  <td className="px-3 py-2 text-white/70">{Number(t.stake).toFixed(2)} {currency}</td>
+                  <td className="px-3 py-2 text-white/70">{t.durationTicks}t</td>
+                  <td
+                    className={`px-3 py-2 font-semibold ${
+                      t.result === "Win"
+                        ? "text-emerald-300"
+                        : t.result === "Loss"
+                        ? "text-red-300"
+                        : "text-yellow-200"
+                    }`}
+                  >
+                    {t.result}
+                  </td>
+                  <td className="rounded-r-lg px-3 py-2 text-white/70">
+                    {typeof t.profit === "number"
+                      ? `${t.profit >= 0 ? "+" : ""}${t.profit.toFixed(2)} ${currency}`
+                      : "—"}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ================= Rise/Fall PANEL ================= */
+
+function RiseFallPanel({
+  selectedPair,
+  setSelectedPair,
+  stake,
+  setStake,
+  rfTickDuration,
+  setRfTickDuration,
+  onPlaceTrade,
+  onPlaceDoubleTrade,
+  currency,
+  tradeHistory,
+  onClearHistory,
+  pairQuotesRef,
+}: {
+  selectedPair: Pair;
+  setSelectedPair: (p: Pair) => void;
+  stake: number;
+  setStake: (n: number) => void;
+  rfTickDuration: number;
+  setRfTickDuration: (n: number) => void;
+    onPlaceTrade: (type: "Rise" | "Fall", duration: number) => void;
+  onPlaceDoubleTrade: (duration: number) => void;
+  currency: string;
+  tradeHistory: Trade[];
+  onClearHistory: () => void;
+  pairQuotesRef: React.MutableRefObject<Record<Pair, number[]>>
+}) {
+  const quotes = pairQuotesRef.current[selectedPair] ?? [];
+  const last20Quotes = quotes.slice(-20);
+  const last12Quotes = quotes.slice(-12);
+  const last6Quotes = quotes.slice(-6);
+
+  const latestQuote = last20Quotes.length ? last20Quotes[last20Quotes.length - 1] : null;
+  const first20 = last20Quotes.length ? last20Quotes[0] : null;
+  const first12 = last12Quotes.length ? last12Quotes[0] : null;
+  const first6 = last6Quotes.length ? last6Quotes[0] : null;
+
+  const longMove = latestQuote !== null && first20 !== null ? latestQuote - first20 : 0;
+  const mediumMove = latestQuote !== null && first12 !== null ? latestQuote - first12 : 0;
+  const shortMove = latestQuote !== null && first6 !== null ? latestQuote - first6 : 0;
+
+  const tickMoves = last12Quotes.slice(1).map((q, i) => q - last12Quotes[i]);
+  const upTicks = tickMoves.filter((m) => m > 0).length;
+  const downTicks = tickMoves.filter((m) => m < 0).length;
+  const flatTicks = tickMoves.filter((m) => m === 0).length;
+
+  const avgMove = tickMoves.length
+    ? tickMoves.reduce((sum, move) => sum + move, 0) / tickMoves.length
+    : 0;
+
+  const trendDirection =
+    shortMove > 0 && mediumMove > 0 && longMove > 0 && upTicks >= Math.max(4, downTicks + 2)
+      ? "UPTREND"
+      : shortMove < 0 && mediumMove < 0 && longMove < 0 && downTicks >= Math.max(4, upTicks + 2)
+      ? "DOWNTREND"
+      : "SIDEWAYS";
+
+  const trendStrength =
+    trendDirection === "UPTREND" || trendDirection === "DOWNTREND"
+      ? Math.abs(shortMove) + Math.abs(mediumMove) + Math.abs(longMove)
+      : 0;
+
+  const recommendedTrade: "Rise" | "Fall" | null =
+    trendDirection === "UPTREND"
+      ? "Rise"
+      : trendDirection === "DOWNTREND"
+      ? "Fall"
+      : null;
+
+  const riseFallTrades = tradeHistory.filter((t) => t.type === "Rise" || t.type === "Fall");
+
+  const tickBadges = last12Quotes.slice(-8).map((q, i, arr) => {
+    const prev = i === 0 ? null : arr[i - 1];
+    const move = prev === null ? 0 : q - prev;
+    const tone =
+      move > 0
+        ? "text-emerald-300 border-emerald-500/30"
+        : move < 0
+        ? "text-red-300 border-red-500/30"
+        : "text-white/60 border-white/10";
+    const arrow = move > 0 ? "↑" : move < 0 ? "↓" : "→";
+    return { value: q, arrow, tone };
+  });
+
+  return (
+    <div className="rounded-2xl border border-white/10 overflow-hidden shadow-[0_0_0_1px_rgba(255,255,255,0.06)]">
+      <div className="bg-gradient-to-br from-[#1b2235]/95 to-[#121826] p-6">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <p className="text-lg font-semibold text-white/90">Rise/Fall</p>
+            <p className="text-xs text-white/60 mt-1">
+              Smart trend mode: reads live ticks for the selected pair and auto-decides Rise or Fall
+            </p>
+          </div>
+        </div>
+
+        <div className="mt-5 grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div className="bg-black/30 rounded-xl p-4 border border-white/10">
+            <p className="text-[11px] text-white/60 uppercase tracking-wide">Index</p>
+            <select
+              className="mt-2 w-full bg-black/40 px-3 py-2 rounded-md border border-white/10"
+              value={selectedPair}
+              onChange={(e) => setSelectedPair(e.target.value as Pair)}
+            >
+              {PAIRS.map((p) => (
+                <option key={p} value={p}>
+                  {p}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div className="bg-black/30 rounded-xl p-4 border border-white/10">
+            <p className="text-[11px] text-white/60 uppercase tracking-wide">Stake</p>
+            <div className="mt-2 flex items-center gap-2">
+              <input
+                type="number"
+                min={0}
+                step={0.01}
+                className="w-full bg-black/40 px-3 py-2 rounded-md border border-white/10"
+                value={stake}
+                onChange={(e) => setStake(Number(e.target.value))}
+              />
+              <span className="text-xs text-white/60">{currency}</span>
+            </div>
+          </div>
+
+          <div className="bg-black/30 rounded-xl p-4 border border-white/10">
+            <p className="text-[11px] text-white/60 uppercase tracking-wide">Duration (ticks)</p>
+            <input
+              type="number"
+              min={1}
+              step={1}
+              className="mt-2 w-full bg-black/40 px-3 py-2 rounded-md border border-white/10"
+              value={rfTickDuration}
+              onChange={(e) => setRfTickDuration(Math.max(1, Number(e.target.value) || 1))}
+            />
+            <p className="text-[11px] text-white/50 mt-2">Tip: use 3–10 ticks and wait for a clear trend before entering.</p>
+          </div>
+
+          <div className="bg-black/30 rounded-xl p-4 border border-white/10">
+            <p className="text-[11px] text-white/60 uppercase tracking-wide">Trend engine</p>
+            <div className="mt-2 space-y-2 text-xs text-white/75">
+              <p>
+                Current quote: <span className="font-semibold text-white/90">{latestQuote !== null ? latestQuote : "Waiting for ticks..."}</span>
+              </p>
+              <p>
+                Trend:{" "}
+                <span
+                  className={`font-semibold ${
+                    trendDirection === "UPTREND"
+                      ? "text-emerald-300"
+                      : trendDirection === "DOWNTREND"
+                      ? "text-red-300"
+                      : "text-yellow-200"
+                  }`}
+                >
+                  {trendDirection}
+                </span>
+              </p>
+              <p>
+                Auto decision: <span className="font-semibold text-sky-300">{recommendedTrade ?? "WAIT / NO TRADE"}</span>
+              </p>
+              <p>
+                Up ticks: <span className="text-emerald-300">{upTicks}</span> • Down ticks: <span className="text-red-300">{downTicks}</span> • Flat: <span className="text-white/60">{flatTicks}</span>
+              </p>
+              <p>
+                Move 6/12/20: <span className="text-white/90">{shortMove.toFixed(4)} / {mediumMove.toFixed(4)} / {longMove.toFixed(4)}</span>
+              </p>
+              <p>
+                Avg tick move: <span className="text-white/90">{avgMove.toFixed(5)}</span> • Strength: <span className="text-white/90">{trendStrength.toFixed(4)}</span>
+              </p>
+            </div>
+          </div>
+        </div>
+
+        <div className="mt-5 bg-black/20 border border-white/10 rounded-xl p-4">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <p className="text-sm font-semibold text-white/85">Live tick tape</p>
+              <p className="text-[11px] text-white/50 mt-1">Last 8 quotes for the selected pair</p>
+            </div>
+            <span className="text-[11px] text-white/60">{selectedPair}</span>
+          </div>
+
+          <div className="mt-3 flex flex-wrap gap-2">
+            {tickBadges.length === 0 ? (
+              <p className="text-[11px] text-white/55">Collecting live quotes...</p>
+            ) : (
+              tickBadges.map((item, idx) => (
+                <div
+                  key={`${item.value}-${idx}`}
+                  className={`px-3 py-2 rounded-lg border bg-black/30 text-[11px] ${item.tone}`}
+                >
+                  {item.arrow} {item.value}
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+
+        <div className="mt-5 bg-black/20 border border-white/10 rounded-xl p-4">
+          <p className="text-[11px] text-white/60 uppercase tracking-wide">Trade actions</p>
+          <div className="mt-3 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-2">
+  <button
+    onClick={() => recommendedTrade && onPlaceTrade(recommendedTrade, rfTickDuration)}
+    disabled={!recommendedTrade}
+    className={`text-sm font-semibold px-4 py-2 rounded-md ${
+      recommendedTrade
+        ? "bg-sky-500/90 hover:bg-sky-500 text-white"
+        : "bg-white/10 text-white/40 cursor-not-allowed"
+    }`}
+  >
+    Auto trade: {recommendedTrade ?? "Waiting..."}
+  </button>
+
+  <button
+    onClick={() => onPlaceTrade("Rise", rfTickDuration)}
+    className="bg-emerald-500/90 hover:bg-emerald-500 text-sm font-semibold px-4 py-2 rounded-md"
+  >
+    Manual Rise (CALL)
+  </button>
+
+  <button
+    onClick={() => onPlaceTrade("Fall", rfTickDuration)}
+    className="bg-red-500/90 hover:bg-red-500 text-sm font-semibold px-4 py-2 rounded-md"
+  >
+    Manual Fall (PUT)
+  </button>
+
+  <button
+    onClick={() => onPlaceDoubleTrade(rfTickDuration)}
+    className="bg-violet-500/90 hover:bg-violet-500 text-sm font-semibold px-4 py-2 rounded-md"
+  >
+    Double Entry (Rise + Fall)
+  </button>
+</div>
+          <p className="text-[11px] text-white/50 mt-2">
+  Auto follows the live trend engine. Double Entry places both Rise and Fall at the same time using the same pair, stake, and tick duration.
+</p>
+        </div>
+
+        <StrategyTradeHistoryTab
+          title="Rise/Fall Trade History"
+          trades={riseFallTrades}
+          currency={currency}
+          onClearHistory={onClearHistory}
+        />
+      </div>
     </div>
   );
 }

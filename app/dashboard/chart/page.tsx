@@ -10,7 +10,7 @@ type MarketBias = "BUY" | "SELL" | "WAIT";
 type MarketStructure = "Uptrend" | "Downtrend" | "Range" | "Unclear";
 
 type Candle = {
-  t: number; // open time (epoch seconds, bucketed)
+  t: number;
   o: number;
   h: number;
   l: number;
@@ -44,8 +44,26 @@ function formatIndexLabel(sym: Pair) {
   return vol || jump || sym;
 }
 
+/** ✅ Map Deriv symbol -> your broker MT5 symbol.
+ * You MUST update this to match your broker’s actual symbol names.
+ */
+function mapToMt5Symbol(selectedPair: Pair): string {
+  // Example placeholders — replace with your broker’s symbols
+  // If your MT5 broker uses same label names, map by label:
+  const label = formatIndexLabel(selectedPair);
+
+  // You can return label directly if your broker uses exactly same names.
+  // Otherwise use a mapping table:
+  const MAP: Record<string, string> = {
+    // "Volatility 75 Index": "Volatility 75 Index",
+    // "Volatility 100 Index": "Volatility 100 Index",
+  };
+
+  return MAP[label] ?? label;
+}
+
 /** =========================
- *  Indicators (fast + "partial" so TP/SL doesn't wait forever)
+ *  Indicators (partial)
  *  ========================= */
 function smaPartial(arr: number[], n: number) {
   if (arr.length === 0) return null;
@@ -60,9 +78,7 @@ function avgAbsDeltaPartial(arr: number[], n: number) {
   const maxPairs = arr.length - 1;
   const k = Math.min(n, maxPairs);
   let s = 0;
-  for (let i = arr.length - k; i < arr.length; i++) {
-    s += Math.abs(arr[i] - arr[i - 1]);
-  }
+  for (let i = arr.length - k; i < arr.length; i++) s += Math.abs(arr[i] - arr[i - 1]);
   return s / k;
 }
 
@@ -74,7 +90,7 @@ function humanHold(tfSec: number, candles: number) {
 }
 
 /** =========================
- *  Candle builder from ticks
+ *  Candle builder
  *  ========================= */
 function floorToTf(epochSec: number, tfSec: number) {
   return Math.floor(epochSec / tfSec) * tfSec;
@@ -84,43 +100,26 @@ function pushTickIntoCandles(prev: Candle[], epochSec: number, price: number, tf
   const bucket = floorToTf(epochSec, tfSec);
   const last = prev[prev.length - 1];
 
-  // New candle
   if (!last || last.t !== bucket) {
     const c: Candle = { t: bucket, o: price, h: price, l: price, c: price };
     const next = [...prev, c];
     return next.length > 360 ? next.slice(-360) : next;
   }
 
-  // Update current candle
-  const updated: Candle = {
-    ...last,
-    h: Math.max(last.h, price),
-    l: Math.min(last.l, price),
-    c: price,
-  };
-
+  const updated: Candle = { ...last, h: Math.max(last.h, price), l: Math.min(last.l, price), c: price };
   return prev.slice(0, -1).concat(updated);
 }
 
 /** =========================
- *  Pan + Zoom (Deriv-like feel)
- *  - wheel: zoom in/out
- *  - drag: pan left/right
- *  - "Live": snap back to the latest data and keep following
+ *  Pan + Zoom hook
  *  ========================= */
-function usePanZoom(length: number, defaultSpan = 120) {
+function usePanZoom(length: number, defaultSpan = 140) {
   const [span, setSpan] = useState(() => clamp(defaultSpan, 20, Math.max(20, length)));
   const [offset, setOffset] = useState(0);
   const [followLive, setFollowLive] = useState(true);
 
-  const dragRef = useRef<{
-    dragging: boolean;
-    startX: number;
-    startOffset: number;
-    width: number;
-  }>({ dragging: false, startX: 0, startOffset: 0, width: 1 });
+  const dragRef = useRef({ dragging: false, startX: 0, startOffset: 0, width: 1 });
 
-  // keep view valid when length changes
   useEffect(() => {
     const maxSpan = Math.max(20, length);
     setSpan((s) => clamp(s, 20, maxSpan));
@@ -134,7 +133,6 @@ function usePanZoom(length: number, defaultSpan = 120) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [length]);
 
-  // if live-follow is on, keep snapping to right edge
   useEffect(() => {
     if (!followLive) return;
     const maxOffset = Math.max(0, length - span);
@@ -146,13 +144,14 @@ function usePanZoom(length: number, defaultSpan = 120) {
     setSpan((oldSpan) => {
       const maxSpan = Math.max(20, length);
       const newSpan = clamp(Math.round(oldSpan * factor), 20, maxSpan);
-      // re-center around focus
+
       setOffset((oldOffset) => {
         const focusIndex = oldOffset + focusRatio * oldSpan;
         const newOffset = Math.round(focusIndex - focusRatio * newSpan);
         const maxOffset = Math.max(0, length - newSpan);
         return clamp(newOffset, 0, maxOffset);
       });
+
       return newSpan;
     });
   };
@@ -165,9 +164,7 @@ function usePanZoom(length: number, defaultSpan = 120) {
     const rectX = (e.nativeEvent as WheelEvent).offsetX ?? containerWidth / 2;
     const ratio = containerWidth > 0 ? clamp(rectX / containerWidth, 0, 1) : 0.5;
 
-    const zoomIn = e.deltaY < 0;
-    const factor = zoomIn ? 0.88 : 1.14;
-    zoomBy(factor, ratio);
+    zoomBy(e.deltaY < 0 ? 0.88 : 1.14, ratio);
   };
 
   const onPointerDown = (e: React.PointerEvent, containerWidth: number) => {
@@ -193,40 +190,26 @@ function usePanZoom(length: number, defaultSpan = 120) {
     dragRef.current.dragging = false;
   };
 
-  const snapLive = () => setFollowLive(true);
-
   return {
     span,
     offset,
     followLive,
     setFollowLive,
-    setSpan,
-    setOffset,
     onWheel,
     onPointerDown,
     onPointerMove,
     onPointerUp,
     zoomIn: () => zoomBy(0.88, 0.5),
     zoomOut: () => zoomBy(1.14, 0.5),
-    snapLive,
+    snapLive: () => setFollowLive(true),
   };
 }
 
 /** =========================
- *  Line chart (SVG) + pan/zoom
+ *  Charts
  *  ========================= */
-function LineChart({
-  data,
-  view,
-  height = 320,
-}: {
-  data: number[];
-  view: { offset: number; span: number };
-  height?: number;
-}) {
+function LineChart({ data, view, height = 320 }: { data: number[]; view: { offset: number; span: number }; height?: number }) {
   const width = 1000;
-  const viewBox = `0 0 ${width} ${height}`;
-
   const slice = data.slice(view.offset, view.offset + view.span);
 
   if (slice.length < 2) {
@@ -258,7 +241,7 @@ function LineChart({
         <div className="text-sm font-semibold text-emerald-300">{last.toFixed(5)}</div>
       </div>
 
-      <svg viewBox={viewBox} className="w-full h-[320px] block select-none">
+      <svg viewBox={`0 0 ${width} ${height}`} className="w-full h-[320px] block select-none">
         <polyline fill="none" stroke="currentColor" strokeWidth="2.2" className="text-sky-300" points={points} />
       </svg>
 
@@ -269,9 +252,6 @@ function LineChart({
   );
 }
 
-/** =========================
- *  Candle chart (SVG) + pan/zoom
- *  ========================= */
 function CandleChart({
   candles,
   view,
@@ -281,11 +261,9 @@ function CandleChart({
   candles: Candle[];
   view: { offset: number; span: number };
   height?: number;
-  highlightTime: number | null; // candle.t to highlight
+  highlightTime: number | null;
 }) {
   const width = 1000;
-  const viewBox = `0 0 ${width} ${height}`;
-
   const slice = candles.slice(view.offset, view.offset + view.span);
 
   if (slice.length < 5) {
@@ -318,7 +296,7 @@ function CandleChart({
         <div className="text-sm font-semibold text-emerald-300">{last.c.toFixed(5)}</div>
       </div>
 
-      <svg viewBox={viewBox} className="w-full h-[320px] block select-none">
+      <svg viewBox={`0 0 ${width} ${height}`} className="w-full h-[320px] block select-none">
         {slice.map((c, i) => {
           const x = padX + i * candleW + candleW / 2;
           const openY = yOf(c.o);
@@ -335,7 +313,6 @@ function CandleChart({
 
           return (
             <g key={c.t}>
-              {/* wick */}
               <line
                 x1={x}
                 x2={x}
@@ -345,8 +322,6 @@ function CandleChart({
                 className={up ? "text-emerald-300/70" : "text-red-300/70"}
                 strokeWidth={1.4}
               />
-
-              {/* body */}
               <rect
                 x={x - bodyW / 2}
                 y={top}
@@ -356,8 +331,6 @@ function CandleChart({
                 fill="currentColor"
                 className={up ? "text-emerald-400/80" : "text-red-400/80"}
               />
-
-              {/* highlight */}
               {isHL && (
                 <rect
                   x={x - candleW / 2}
@@ -384,9 +357,7 @@ function CandleChart({
 }
 
 /** =========================
- *  Market Structure + Regular + Sniper + fast TP/SL
- *  - TP/SL and bias populate early (partial indicators)
- *  - Sniper waits for fewer candles than before
+ *  Analysis
  *  ========================= */
 function buildRecommendationFromCandles(candles: Candle[], tfSec: number) {
   const closes = candles.map((c) => c.c);
@@ -394,38 +365,30 @@ function buildRecommendationFromCandles(candles: Candle[], tfSec: number) {
 
   const fast = smaPartial(closes, 14);
   const slow = smaPartial(closes, 40);
-
-  const vol = avgAbsDeltaPartial(closes, 20); // partial => shows earlier
+  const vol = avgAbsDeltaPartial(closes, 20);
   const v = vol ?? 0;
 
-  // slope (partial)
   const slope = (() => {
     if (closes.length < 8) return null;
     const look = Math.min(20, closes.length - 1);
     return closes[closes.length - 1] - closes[closes.length - 1 - look];
   })();
 
-  // structure
   let structure: MarketStructure = "Unclear";
   if (fast != null && slow != null && slope != null && closes.length >= 10) {
     if (fast > slow && slope > 0) structure = "Uptrend";
     else if (fast < slow && slope < 0) structure = "Downtrend";
     else structure = "Range";
   } else if (closes.length >= 6) {
-    // fallback: micro structure
     const a = closes[closes.length - 6];
     const b = closes[closes.length - 1];
-    if (b > a) structure = "Uptrend";
-    else if (b < a) structure = "Downtrend";
-    else structure = "Range";
+    structure = b > a ? "Uptrend" : b < a ? "Downtrend" : "Range";
   }
 
   let bias: MarketBias = "WAIT";
   if (structure === "Uptrend") bias = "BUY";
   if (structure === "Downtrend") bias = "SELL";
-  if (structure === "Range") bias = "WAIT";
 
-  // regular entry (always available once we have some candles)
   const lookback = candles.slice(-30);
   const hi = lookback.length ? Math.max(...lookback.map((c) => c.h)) : null;
   const lo = lookback.length ? Math.min(...lookback.map((c) => c.l)) : null;
@@ -451,9 +414,10 @@ function buildRecommendationFromCandles(candles: Candle[], tfSec: number) {
     }
   }
 
-  // sniper entry (lighter requirements than before)
+  // sniper entry (engulf near fast)
   let sniperText = "Sniper entry: waiting for a clean reversal candle…";
   let entryCandleTime: number | null = null;
+  let sniperSignalSide: "BUY" | "SELL" | null = null;
 
   const holdCandles = tfSec >= 3600 ? 2 : tfSec >= 900 ? 3 : 4;
   const holdText = `Hold suggestion: ${humanHold(tfSec, holdCandles)} (≈ ${holdCandles} candle(s)).`;
@@ -468,7 +432,6 @@ function buildRecommendationFromCandles(candles: Candle[], tfSec: number) {
     const bullish = cur.c > cur.o;
     const bearish = cur.c < cur.o;
 
-    // simple engulf / strong reversal
     const bullishEngulf = bullish && prev.c < prev.o && cur.o <= prev.c && cur.c >= prev.o;
     const bearishEngulf = bearish && prev.c > prev.o && cur.o >= prev.c && cur.c <= prev.o;
 
@@ -476,6 +439,7 @@ function buildRecommendationFromCandles(candles: Candle[], tfSec: number) {
       if (nearFast && bullishEngulf) {
         sniperText = "Sniper entry: Pullback into fast SMA + bullish engulf → BUY signal.";
         entryCandleTime = cur.t;
+        sniperSignalSide = "BUY";
       } else {
         sniperText = "Sniper entry: Wait for pullback into fast SMA, then a strong bullish reversal (engulf / strong close).";
       }
@@ -483,14 +447,14 @@ function buildRecommendationFromCandles(candles: Candle[], tfSec: number) {
       if (nearFast && bearishEngulf) {
         sniperText = "Sniper entry: Rally into fast SMA + bearish engulf → SELL signal.";
         entryCandleTime = cur.t;
+        sniperSignalSide = "SELL";
       } else {
         sniperText = "Sniper entry: Wait for rally into fast SMA, then a strong bearish reversal (engulf / strong close).";
       }
     } else if (structure === "Range") {
-      sniperText =
-        "Sniper entry (Range): Only take extremes — look for a rejection/engulf candle at the range edge (tight stop).";
+      sniperText = "Sniper entry (Range): Only take extremes — rejection/engulf at range edge (tight stop).";
     } else {
-      sniperText = "Sniper entry: WAIT — structure unclear. Need cleaner trend or a defined range.";
+      sniperText = "Sniper entry: WAIT — structure unclear.";
     }
   }
 
@@ -499,13 +463,15 @@ function buildRecommendationFromCandles(candles: Candle[], tfSec: number) {
     enterOn = "Candle entry: Enter on highlighted candle CLOSE (safer) or next candle OPEN (more aggressive).";
   }
 
-  // TP/SL (populate early; partial vol)
+  // TP/SL early
   let tp: number | null = null;
   let sl: number | null = null;
 
   if (last != null) {
-    const baseVol = vol ?? (closes.length >= 2 ? Math.abs(closes[closes.length - 1] - closes[closes.length - 2]) : 0);
-    const safeVol = Math.max(baseVol, Math.abs(last) * 0.000005); // avoid zero
+    const baseVol =
+      vol ?? (closes.length >= 2 ? Math.abs(closes[closes.length - 1] - closes[closes.length - 2]) : 0);
+
+    const safeVol = Math.max(baseVol, Math.abs(last) * 0.000005);
     const risk = clamp(safeVol * 6, safeVol * 2, safeVol * 16);
     const reward = risk * 1.5;
 
@@ -516,7 +482,6 @@ function buildRecommendationFromCandles(candles: Candle[], tfSec: number) {
       sl = last + risk;
       tp = last - reward;
     } else {
-      // range/unclear: still show guidance around last
       sl = last - risk;
       tp = last + reward;
     }
@@ -536,12 +501,17 @@ function buildRecommendationFromCandles(candles: Candle[], tfSec: number) {
     holdText,
     enterOn,
     entryCandleTime,
+    sniperSignalSide,
   };
 }
 
+/** =========================
+ *  Page
+ *  ========================= */
 export default function ChartDashboardPage() {
   const router = useRouter();
 
+  // Deriv token (your existing)
   const [token, setToken] = useState("");
   const [connected, setConnected] = useState(false);
 
@@ -553,21 +523,37 @@ export default function ChartDashboardPage() {
   const [candles, setCandles] = useState<Candle[]>([]);
 
   const wsRef = useRef<WebSocket | null>(null);
-
-  // chart interaction container refs
   const chartBoxRef = useRef<HTMLDivElement | null>(null);
 
-  // Pan/zoom views (keep separate so switching candles/line DOES NOT reset analysis)
-  const lineView = usePanZoom(prices.length, 200);
+  const lineView = usePanZoom(prices.length, 220);
   const candleView = usePanZoom(candles.length, 140);
+  const activeView = chartMode === "line" ? lineView : candleView;
 
-  // Load saved token (shared with main dashboard + can be reused by MT5 dashboard too)
+  // MT5 Connect (MetaApi)
+  const [mt5Token, setMt5Token] = useState("");
+  const [mt5AccountId, setMt5AccountId] = useState("");
+  const [mt5Connected, setMt5Connected] = useState(false);
+  const [autoTrade, setAutoTrade] = useState(false);
+  const [lotSize, setLotSize] = useState(0.2);
+
+  const [lastMt5Msg, setLastMt5Msg] = useState<string>("");
+  const [lastPositionId, setLastPositionId] = useState<string>("");
+
+  // Safety: prevent duplicate orders
+  const lastTradeKeyRef = useRef<string>("");
+  const lastTradeAtRef = useRef<number>(0);
+
   useEffect(() => {
-    const t = localStorage.getItem("deriv_token") || "";
-    setToken(t);
+    setToken(localStorage.getItem("deriv_token") || "");
+
+    // MT5 creds local for now (you can move server-side later)
+    setMt5Token(localStorage.getItem("mt5_metaapi_token") || "");
+    setMt5AccountId(localStorage.getItem("mt5_metaapi_account_id") || "");
+    const lsLot = Number(localStorage.getItem("mt5_lot") || "");
+    if (Number.isFinite(lsLot) && lsLot > 0) setLotSize(lsLot);
   }, []);
 
-  const connect = () => {
+  const connectDeriv = () => {
     const t = token || localStorage.getItem("deriv_token") || "";
     if (!t) return alert("Enter your Deriv API token on the main dashboard first.");
 
@@ -579,8 +565,6 @@ export default function ChartDashboardPage() {
     } catch {}
     wsRef.current = null;
 
-    // IMPORTANT: don’t reset analysis on chartMode change.
-    // We only reset when switching symbol or timeframe.
     setPrices([]);
     setCandles([]);
     setConnected(false);
@@ -588,39 +572,31 @@ export default function ChartDashboardPage() {
     const ws = new WebSocket(`wss://ws.derivws.com/websockets/v3?app_id=${APP_ID}`);
     wsRef.current = ws;
 
-    ws.onopen = () => {
-      ws.send(JSON.stringify({ authorize: t }));
-    };
+    ws.onopen = () => ws.send(JSON.stringify({ authorize: t }));
 
     ws.onmessage = (e) => {
       const data = JSON.parse(e.data);
-
       if (data?.error?.message) {
         alert(data.error.message);
         return;
       }
-
       if (data.msg_type === "authorize") {
         setConnected(true);
         ws.send(JSON.stringify({ ticks: selectedPair, subscribe: 1 }));
       }
-
       if (data.msg_type === "tick" && data.tick?.quote !== undefined) {
         const sym = data.tick.symbol as Pair;
         if (sym !== selectedPair) return;
 
         const q = Number(data.tick.quote);
         const epochSec = Number(data.tick.epoch);
-
         if (!Number.isFinite(q) || !Number.isFinite(epochSec)) return;
 
-        // line data
         setPrices((prev) => {
           const next = [...prev, q];
           return next.length > 1400 ? next.slice(-1400) : next;
         });
 
-        // candle data
         setCandles((prev) => pushTickIntoCandles(prev, epochSec, q, tfSec));
       }
     };
@@ -629,7 +605,7 @@ export default function ChartDashboardPage() {
     ws.onerror = () => alert("Chart connection failed");
   };
 
-  const disconnect = () => {
+  const disconnectDeriv = () => {
     try {
       wsRef.current?.close();
     } catch {}
@@ -637,7 +613,6 @@ export default function ChartDashboardPage() {
     setConnected(false);
   };
 
-  // When switching index/timeframe while connected, resubscribe/reset
   useEffect(() => {
     if (!connected) return;
     const ws = wsRef.current;
@@ -653,19 +628,135 @@ export default function ChartDashboardPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedPair, tfSec, connected]);
 
-  // Analysis always runs from candles (so switching chartMode doesn't restart analysis)
   const rec = useMemo(() => buildRecommendationFromCandles(candles, tfSec), [candles, tfSec]);
 
-  const activeView = chartMode === "line" ? lineView : candleView;
-
   const getChartWidth = () => chartBoxRef.current?.clientWidth ?? 900;
+
+  // --- MT5 actions ---
+  const saveMt5Creds = (t: string, a: string) => {
+    localStorage.setItem("mt5_metaapi_token", t);
+    localStorage.setItem("mt5_metaapi_account_id", a);
+  };
+
+  const testMt5 = async () => {
+    setLastMt5Msg("Testing connection…");
+    try {
+      const r = await fetch("/api/mt5/test", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token: mt5Token, accountId: mt5AccountId }),
+      });
+      const j = await r.json();
+      if (!j.ok) {
+        setMt5Connected(false);
+        setLastMt5Msg(`❌ ${j.error || "Failed"}`);
+        return;
+      }
+      setMt5Connected(true);
+      setLastMt5Msg(`✅ Connected (${j.accountCurrency ?? ""} @ ${j.brokerTime ?? ""})`);
+    } catch (e: any) {
+      setMt5Connected(false);
+      setLastMt5Msg(`❌ ${e?.message ?? "Test failed"}`);
+    }
+  };
+
+  const placeMt5Trade = async (side: "BUY" | "SELL", reason: "sniper" | "regular") => {
+    if (!mt5Token || !mt5AccountId) return alert("Enter MT5 MetaApi token + accountId first.");
+    if (!Number.isFinite(lotSize) || lotSize <= 0) return alert("Set a valid lot size.");
+    if (rec.tp == null || rec.sl == null) return alert("TP/SL not ready yet (need more candles).");
+
+    const symbol = mapToMt5Symbol(selectedPair);
+    const clientId = `metroai_${selectedPair}_${tfSec}_${reason}_${rec.entryCandleTime ?? "x"}`;
+
+    setLastMt5Msg("Placing order…");
+    try {
+      const r = await fetch("/api/mt5/order", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          token: mt5Token,
+          accountId: mt5AccountId,
+          symbol,
+          side,
+          volume: lotSize,
+          sl: rec.sl,
+          tp: rec.tp,
+          comment: `metroai_${reason}`,
+          clientId,
+        }),
+      });
+      const j = await r.json();
+      if (!j.ok) {
+        setLastMt5Msg(`❌ Order failed: ${j.error || "Unknown error"}`);
+        return;
+      }
+
+      // MetaApi result shape can vary by broker; try common fields
+      const posId =
+        j?.result?.positionId ||
+        j?.result?.orderId ||
+        j?.result?.stringCode ||
+        "";
+
+      if (posId) setLastPositionId(String(posId));
+      setLastMt5Msg(`✅ Order placed (${reason}) ${symbol} ${side} lot ${lotSize}`);
+      lastTradeAtRef.current = Date.now();
+    } catch (e: any) {
+      setLastMt5Msg(`❌ ${e?.message ?? "Order failed"}`);
+    }
+  };
+
+  const closeLastPosition = async () => {
+    if (!lastPositionId) return alert("No last positionId saved yet.");
+    setLastMt5Msg("Closing position…");
+    try {
+      const r = await fetch("/api/mt5/close", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token: mt5Token, accountId: mt5AccountId, positionId: lastPositionId }),
+      });
+      const j = await r.json();
+      if (!j.ok) {
+        setLastMt5Msg(`❌ Close failed: ${j.error || "Unknown error"}`);
+        return;
+      }
+      setLastMt5Msg(`✅ Closed position ${lastPositionId}`);
+      setLastPositionId("");
+    } catch (e: any) {
+      setLastMt5Msg(`❌ ${e?.message ?? "Close failed"}`);
+    }
+  };
+
+  // --- Auto-trade logic ---
+  useEffect(() => {
+    if (!autoTrade) return;
+    if (!mt5Connected) return;
+    if (!connected) return;
+
+    // Only auto trade when sniper candle triggers AND bias is directional
+    if (!rec.entryCandleTime || !rec.sniperSignalSide) return;
+    if (rec.tp == null || rec.sl == null) return;
+
+    // Throttle: at most 1 trade per 60 seconds (adjust as you want)
+    const now = Date.now();
+    if (now - lastTradeAtRef.current < 60_000) return;
+
+    // Idempotency: same candle/timeframe/symbol/reason should only trade once
+    const tradeKey = `${selectedPair}|${tfSec}|sniper|${rec.entryCandleTime}|${rec.sniperSignalSide}`;
+    if (tradeKey === lastTradeKeyRef.current) return;
+
+    lastTradeKeyRef.current = tradeKey;
+
+    // Fire
+    placeMt5Trade(rec.sniperSignalSide, "sniper");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoTrade, mt5Connected, connected, rec.entryCandleTime, rec.sniperSignalSide, rec.tp, rec.sl]);
 
   return (
     <main className="min-h-screen relative overflow-hidden text-white">
       <div className="pointer-events-none absolute inset-0 bg-gradient-to-br from-[#070c16] via-[#070c16] to-black" />
 
       <div className="relative">
-        {/* Top bar */}
         <header className="h-16 bg-[#0f1b2d]/70 backdrop-blur-md flex items-center justify-between px-6 border-b border-white/10">
           <div className="flex items-center gap-3">
             <img
@@ -674,13 +765,13 @@ export default function ChartDashboardPage() {
               className="w-10 h-9 rounded-md object-contain bg-white/5 p-1 border border-white/10"
             />
             <div>
-              <p className="font-bold leading-tight">Chart Strategy</p>
-              <p className="text-xs text-gray-400">Live Deriv Index Chart</p>
+              <p className="font-bold leading-tight">MT5 Chart Strategy</p>
+              <p className="text-xs text-gray-400">Deriv feed → MT5 execution (MetaApi)</p>
             </div>
           </div>
 
           <div className="flex items-center gap-3 text-sm text-gray-300">
-            <span className="text-green-400">● {connected ? "Connected" : "Disconnected"}</span>
+            <span className="text-green-400">● {connected ? "Deriv Connected" : "Deriv Disconnected"}</span>
             <button onClick={() => router.push("/dashboard")} className="hover:text-white">
               Back
             </button>
@@ -688,15 +779,12 @@ export default function ChartDashboardPage() {
         </header>
 
         <section className="mx-auto w-full max-w-7xl px-4 sm:px-6 lg:px-8 py-6 space-y-6">
-          {/* Connection */}
+          {/* Deriv Connection */}
           <div className="rounded-2xl border border-white/10 bg-[#13233d]/80 backdrop-blur p-5">
             <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
               <div>
-                <p className="font-semibold text-white/85">Deriv Chart Connection</p>
-                <p className="text-xs text-white/55">
-                  Uses the same token saved from the main dashboard (also reusable on your MT5 dashboard if it reads{" "}
-                  <span className="text-white/80 font-semibold">localStorage.deriv_token</span>).
-                </p>
+                <p className="font-semibold text-white/85">Deriv Price Feed</p>
+                <p className="text-xs text-white/55">Uses your saved Deriv token (localStorage.deriv_token).</p>
               </div>
 
               {!connected ? (
@@ -706,32 +794,111 @@ export default function ChartDashboardPage() {
                     placeholder="Deriv API Token"
                     value={token}
                     onChange={(e) => {
-                      const v = e.target.value;
-                      setToken(v);
-                      localStorage.setItem("deriv_token", v); // sync for other dashboards
+                      setToken(e.target.value);
+                      localStorage.setItem("deriv_token", e.target.value);
                     }}
                     className="flex-1 md:w-[320px] bg-black/40 px-3 py-2 rounded-md border border-white/10"
                   />
-                  <button onClick={connect} className="bg-indigo-500 px-4 py-2 rounded-md text-sm">
+                  <button onClick={connectDeriv} className="bg-indigo-500 px-4 py-2 rounded-md text-sm">
                     Connect
                   </button>
                 </div>
               ) : (
-                <button onClick={disconnect} className="bg-red-500 hover:bg-red-600 px-4 py-2 rounded-md text-sm">
+                <button onClick={disconnectDeriv} className="bg-red-500 hover:bg-red-600 px-4 py-2 rounded-md text-sm">
                   Disconnect
                 </button>
               )}
             </div>
           </div>
 
-          {/* Controls + Chart */}
+          {/* MT5 Connect */}
+          <div className="rounded-2xl border border-white/10 bg-[#13233d]/80 backdrop-blur p-5">
+            <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
+              <div>
+                <p className="font-semibold text-white/85">MT5 Execution (MetaApi)</p>
+                <p className="text-xs text-white/55">
+                  Connect your MT5 account to allow placing and closing trades from the dashboard.
+                </p>
+                {lastMt5Msg && <p className="mt-2 text-xs text-white/70">{lastMt5Msg}</p>}
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-4 gap-2 w-full lg:w-auto">
+                <input
+                  type="password"
+                  placeholder="MetaApi Token"
+                  value={mt5Token}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    setMt5Token(v);
+                    saveMt5Creds(v, mt5AccountId);
+                  }}
+                  className="bg-black/40 px-3 py-2 rounded-md border border-white/10"
+                />
+                <input
+                  placeholder="MetaApi Account ID"
+                  value={mt5AccountId}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    setMt5AccountId(v);
+                    saveMt5Creds(mt5Token, v);
+                  }}
+                  className="bg-black/40 px-3 py-2 rounded-md border border-white/10"
+                />
+                <input
+                  type="number"
+                  step="0.01"
+                  min="0.01"
+                  placeholder="Lot Size"
+                  value={lotSize}
+                  onChange={(e) => {
+                    const v = Number(e.target.value);
+                    setLotSize(v);
+                    localStorage.setItem("mt5_lot", String(v));
+                  }}
+                  className="bg-black/40 px-3 py-2 rounded-md border border-white/10"
+                />
+                <button
+                  onClick={testMt5}
+                  className={`px-4 py-2 rounded-md text-sm ${
+                    mt5Connected ? "bg-emerald-600/70 hover:bg-emerald-600" : "bg-indigo-500 hover:bg-indigo-600"
+                  }`}
+                >
+                  {mt5Connected ? "Re-test" : "Test Connect"}
+                </button>
+              </div>
+            </div>
+
+            <div className="mt-4 flex flex-wrap items-center gap-3">
+              <button
+                onClick={() => setAutoTrade((v) => !v)}
+                className={`px-4 py-2 rounded-md text-sm border ${
+                  autoTrade
+                    ? "bg-emerald-500/20 border-emerald-400/30 text-emerald-200"
+                    : "bg-black/25 border-white/10 hover:bg-black/35 text-white/80"
+                }`}
+              >
+                Auto-trade: {autoTrade ? "ON" : "OFF"}
+              </button>
+
+              <div className="text-xs text-white/55">
+                Auto-trade triggers only on <span className="text-white/80 font-semibold">Sniper candle</span> events.
+              </div>
+
+              {lastPositionId && (
+                <button onClick={closeLastPosition} className="ml-auto bg-red-500/80 hover:bg-red-500 px-4 py-2 rounded-md text-sm">
+                  Close Last Position
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* Main layout */}
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-            {/* Left: controls & recommendation */}
+            {/* Left */}
             <div className="space-y-6">
               {/* Index */}
               <div className="rounded-2xl border border-white/10 bg-[#13233d]/80 backdrop-blur p-5">
                 <p className="text-sm font-semibold text-white/85 mb-3">Index</p>
-
                 <select
                   className="w-full bg-[#0e1422] border border-white/10 p-2 rounded-md text-sm"
                   value={selectedPair}
@@ -752,9 +919,8 @@ export default function ChartDashboardPage() {
                     ))}
                   </optgroup>
                 </select>
-
                 <div className="mt-3 text-xs text-white/55">
-                  Current: <span className="text-white/80 font-semibold">{formatIndexLabel(selectedPair)}</span>
+                  MT5 symbol: <span className="text-white/80 font-semibold">{mapToMt5Symbol(selectedPair)}</span>
                 </div>
               </div>
 
@@ -792,16 +958,10 @@ export default function ChartDashboardPage() {
                 </div>
 
                 <div className="mt-3 flex items-center gap-2">
-                  <button
-                    onClick={activeView.zoomIn}
-                    className="px-3 py-1.5 rounded-md text-xs bg-black/25 border border-white/10 hover:bg-black/35"
-                  >
+                  <button onClick={activeView.zoomIn} className="px-3 py-1.5 rounded-md text-xs bg-black/25 border border-white/10 hover:bg-black/35">
                     +
                   </button>
-                  <button
-                    onClick={activeView.zoomOut}
-                    className="px-3 py-1.5 rounded-md text-xs bg-black/25 border border-white/10 hover:bg-black/35"
-                  >
+                  <button onClick={activeView.zoomOut} className="px-3 py-1.5 rounded-md text-xs bg-black/25 border border-white/10 hover:bg-black/35">
                     −
                   </button>
                   <button
@@ -814,18 +974,11 @@ export default function ChartDashboardPage() {
                   >
                     Live
                   </button>
-                  <div className="ml-auto text-[11px] text-white/55">
-                    Wheel = zoom • Drag = pan
-                  </div>
+                  <div className="ml-auto text-[11px] text-white/55">Wheel = zoom • Drag = pan</div>
                 </div>
-
-                <p className="mt-3 text-[11px] text-white/50">
-                  Switching Candles/Line does <span className="text-white/70 font-semibold">not</span> reset analysis.
-                  Switching timeframe resets the candle aggregation.
-                </p>
               </div>
 
-              {/* Market structure + entries + TP/SL */}
+              {/* Market structure + actions */}
               <div className="rounded-2xl border border-white/10 bg-[#13233d]/80 backdrop-blur p-5">
                 <p className="text-sm font-semibold text-white/85 mb-2">Market Structure</p>
 
@@ -838,63 +991,72 @@ export default function ChartDashboardPage() {
                   <span className="text-xs text-white/55">Bias</span>
                   <span
                     className={`text-sm font-extrabold ${
-                      rec.bias === "BUY"
-                        ? "text-emerald-300"
-                        : rec.bias === "SELL"
-                        ? "text-red-300"
-                        : "text-yellow-200"
+                      rec.bias === "BUY" ? "text-emerald-300" : rec.bias === "SELL" ? "text-red-300" : "text-yellow-200"
                     }`}
                   >
                     {rec.bias}
                   </span>
                 </div>
 
-                {/* Regular entry */}
                 <div className="mt-4 rounded-xl bg-black/20 border border-white/10 p-4">
                   <p className="text-xs text-white/60 font-semibold">✅ Regular Entry</p>
                   <p className="mt-2 text-xs text-white/75 whitespace-pre-line">{rec.regularText}</p>
                 </div>
 
-                {/* Sniper entry */}
                 <div className="mt-3 rounded-xl bg-black/20 border border-white/10 p-4">
                   <p className="text-xs text-white/60 font-semibold">🎯 Sniper Entry</p>
                   <p className="mt-2 text-xs text-white/75 whitespace-pre-line">{rec.sniperText}</p>
-
                   <div className="mt-3 text-[11px] text-white/60">
                     <div>🕒 {rec.holdText}</div>
                     <div className="mt-1">🟡 {rec.enterOn}</div>
                   </div>
-
-                  {rec.entryCandleTime != null && (
-                    <div className="mt-3 text-xs font-semibold text-yellow-200">
-                      ✅ Entry candle detected — highlighted on the candles chart
-                    </div>
-                  )}
                 </div>
 
-                {/* TP/SL quick */}
                 <div className="mt-4 grid grid-cols-2 gap-3">
                   <div className="rounded-xl bg-black/20 border border-white/10 p-3">
-                    <p className="text-[11px] text-white/55">Take Profit (guide)</p>
-                    <p className="mt-1 text-sm font-semibold text-white/85">
-                      {rec.tp != null ? rec.tp.toFixed(5) : "—"}
-                    </p>
+                    <p className="text-[11px] text-white/55">Take Profit</p>
+                    <p className="mt-1 text-sm font-semibold text-white/85">{rec.tp != null ? rec.tp.toFixed(5) : "—"}</p>
                   </div>
                   <div className="rounded-xl bg-black/20 border border-white/10 p-3">
-                    <p className="text-[11px] text-white/55">Stop Loss (guide)</p>
-                    <p className="mt-1 text-sm font-semibold text-white/85">
-                      {rec.sl != null ? rec.sl.toFixed(5) : "—"}
-                    </p>
+                    <p className="text-[11px] text-white/55">Stop Loss</p>
+                    <p className="mt-1 text-sm font-semibold text-white/85">{rec.sl != null ? rec.sl.toFixed(5) : "—"}</p>
                   </div>
+                </div>
+
+                {/* Manual trade buttons */}
+                <div className="mt-4 grid grid-cols-2 gap-3">
+                  <button
+                    disabled={!mt5Connected || rec.bias === "WAIT"}
+                    onClick={() => placeMt5Trade(rec.bias === "BUY" ? "BUY" : "SELL", "regular")}
+                    className={`px-4 py-2 rounded-md text-sm border ${
+                      !mt5Connected || rec.bias === "WAIT"
+                        ? "bg-black/20 border-white/10 text-white/40 cursor-not-allowed"
+                        : "bg-indigo-500/90 hover:bg-indigo-500 border-white/10"
+                    }`}
+                  >
+                    Place Regular Trade
+                  </button>
+
+                  <button
+                    disabled={!mt5Connected || !rec.sniperSignalSide}
+                    onClick={() => placeMt5Trade(rec.sniperSignalSide!, "sniper")}
+                    className={`px-4 py-2 rounded-md text-sm border ${
+                      !mt5Connected || !rec.sniperSignalSide
+                        ? "bg-black/20 border-white/10 text-white/40 cursor-not-allowed"
+                        : "bg-emerald-600/80 hover:bg-emerald-600 border-white/10"
+                    }`}
+                  >
+                    Place Sniper Trade
+                  </button>
                 </div>
 
                 <div className="mt-3 text-[11px] text-white/45">
-                  Note: Rules-based guidance (not financial advice). Always backtest + use risk control.
+                  Safety: Auto-trade is throttled + idempotent to avoid duplicates. Still use a demo account first.
                 </div>
               </div>
             </div>
 
-            {/* Right: chart */}
+            {/* Right chart */}
             <div className="lg:col-span-2 rounded-2xl border border-white/10 bg-[#13233d]/80 backdrop-blur p-5">
               <div className="flex items-center justify-between mb-3">
                 <p className="text-sm font-semibold text-white/85">Live Chart</p>
@@ -903,7 +1065,6 @@ export default function ChartDashboardPage() {
                 </p>
               </div>
 
-              {/* Interaction layer */}
               <div
                 ref={chartBoxRef}
                 className="rounded-xl"
@@ -923,29 +1084,6 @@ export default function ChartDashboardPage() {
                     highlightTime={rec.entryCandleTime}
                   />
                 )}
-              </div>
-
-              <div className="mt-4 grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
-                <div className="rounded-xl bg-black/20 border border-white/10 p-3">
-                  <p className="text-white/55">SMA(14)</p>
-                  <p className="mt-1 text-white/85 font-semibold">{rec.fast != null ? rec.fast.toFixed(5) : "—"}</p>
-                </div>
-                <div className="rounded-xl bg-black/20 border border-white/10 p-3">
-                  <p className="text-white/55">SMA(40)</p>
-                  <p className="mt-1 text-white/85 font-semibold">{rec.slow != null ? rec.slow.toFixed(5) : "—"}</p>
-                </div>
-                <div className="rounded-xl bg-black/20 border border-white/10 p-3">
-                  <p className="text-white/55">Volatility</p>
-                  <p className="mt-1 text-white/85 font-semibold">
-                    {rec.vol != null ? rec.vol.toExponential(2) : "—"}
-                  </p>
-                </div>
-                <div className="rounded-xl bg-black/20 border border-white/10 p-3">
-                  <p className="text-white/55">{chartMode === "candles" ? "Candles" : "Ticks"}</p>
-                  <p className="mt-1 text-white/85 font-semibold">
-                    {chartMode === "candles" ? candles.length : prices.length}
-                  </p>
-                </div>
               </div>
             </div>
           </div>
