@@ -91,10 +91,18 @@ export const PAIRS = RISE_FALL_PAIRS;
 export type Pair = (typeof PAIRS)[number];
 
 type TradeResult = "Win" | "Loss" | "Pending";
-type TradeType = "Matches" | "Differs" | "Over" | "Under" | "Rise" | "Fall";
+type TradeType =
+  | "Matches"
+  | "Differs"
+  | "Over"
+  | "Under"
+  | "Rise"
+  | "Fall"
+  | "Higher"
+  | "Lower";
 
 type Trade = {
- source?: "MetroX" | "Metro" | "SpiderX" | "SpiderX Auto" | "Edshell";
+ source?: "MetroX" | "Metro" | "SpiderX" | "SpiderX Auto" | "Edshell" | "M-Spider";
   id: number; // req_id
   contract_id?: number;
 
@@ -126,10 +134,16 @@ const CONTRACT_TYPE_MAP: Record<TradeType, string> = {
   // Rise/Fall
   Rise: "CALL",
   Fall: "PUT",
+
+  // Higher/Lower
+  Higher: "CALL",
+  Lower: "PUT",
 };
 function getContractType(type: TradeType, allowEquals: boolean) {
   if (type === "Rise") return allowEquals ? "CALLE" : "CALL";
   if (type === "Fall") return allowEquals ? "PUTE" : "PUT";
+  if (type === "Higher") return "CALL";
+  if (type === "Lower") return "PUT";
   return CONTRACT_TYPE_MAP[type];
 }
 
@@ -140,12 +154,27 @@ function sleep(ms: number) {
 function formatTime(ms: number) {
   return new Date(ms).toLocaleString();
 }
+function parseMSpiderDuration(value: string): { duration: number; duration_unit: "t" | "s" | "m" | "h" } {
+  if (/^\d+$/.test(value)) {
+    return { duration: Number(value), duration_unit: "t" };
+  }
+  if (/^\d+s$/.test(value)) {
+    return { duration: Number.parseInt(value, 10), duration_unit: "s" };
+  }
+  if (/^\d+m$/.test(value)) {
+    return { duration: Number.parseInt(value, 10), duration_unit: "m" };
+  }
+  if (/^\d+h$/.test(value)) {
+    return { duration: Number.parseInt(value, 10), duration_unit: "h" };
+  }
+  return { duration: 5, duration_unit: "t" };
+}
 function MarketIndicator({
   activeStrategy,
   selectedPair,
   pairDigitsRef,
 }: {
-  activeStrategy: "matches" | "overunder" | "risefall" | null;
+  activeStrategy: "matches" | "overunder" | "risefall" | "mspider" | null;
   selectedPair: Pair;
   pairDigitsRef: React.MutableRefObject<Record<Pair, number[]>>;
 }) {
@@ -317,6 +346,8 @@ const chiSquareUniform = (f: number[], n: number) => {
     ? "SpiderX"
     : activeStrategy === "risefall"
     ? "Rise/Fall"
+    : activeStrategy === "mspider"
+    ? "M-Spider"
     : "No strategy selected";
 
   // MetroX (DIFFERS edge): we want a *least frequent digit*, low pct, and NOT seen in last5
@@ -630,13 +661,14 @@ if (riskLevel === "HIGH" && !sustainedHigh) {
  */
 const STRATEGY_FLAGS_KEY = "strategy_flags";
 
-type StrategyKey = "matches" | "overunder" | "risefall";
+type StrategyKey = "matches" | "overunder" | "risefall" | "mspider";
 type StrategyFlags = Record<StrategyKey, boolean>;
 
 const DEFAULT_FLAGS: StrategyFlags = {
   matches: true,
   overunder: true,
   risefall: true,
+  mspider: true,
 };
 const UI_FLAGS_KEY = "ui_flags";
 
@@ -693,10 +725,11 @@ function readStrategyFlags(): StrategyFlags {
     if (!raw) return DEFAULT_FLAGS;
     const parsed = JSON.parse(raw) as Partial<StrategyFlags>;
     return {
-      matches: typeof parsed.matches === "boolean" ? parsed.matches : true,
-      overunder: typeof parsed.overunder === "boolean" ? parsed.overunder : true,
-      risefall: typeof parsed.risefall === "boolean" ? parsed.risefall : true,
-    };
+  matches: typeof parsed.matches === "boolean" ? parsed.matches : true,
+  overunder: typeof parsed.overunder === "boolean" ? parsed.overunder : true,
+  risefall: typeof parsed.risefall === "boolean" ? parsed.risefall : true,
+  mspider: typeof parsed.mspider === "boolean" ? parsed.mspider : true,
+};
   } catch {
     return DEFAULT_FLAGS;
   }
@@ -772,7 +805,7 @@ useEffect(() => {
 
   const wsRef = useRef<WebSocket | null>(null);
   const authorizedRef = useRef(false);
-  const activeStrategyRef = useRef<"matches" | "overunder" | "risefall" | null>(null);
+  const activeStrategyRef = useRef<"matches" | "overunder" | "risefall" | "mspider" | null>(null);
   const selectedPairRef = useRef<Pair>(PAIRS[0]);
   const lastEdshellAtRef = useRef(0);
   const [uiFlags, setUiFlags] = useState<UIFlags>(DEFAULT_UI_FLAGS);
@@ -793,6 +826,10 @@ const pairQuotesRef = useRef<Record<Pair, number[]>>(
   const buyAckWaitersRef = useRef<
     Record<number, { resolve: () => void; reject: (msg: string) => void }>
   >({});
+
+  const proposalPreviewWaitersRef = useRef<
+  Record<number, { resolve: (proposal: any) => void; reject: (msg: string) => void }>
+>({});
 
   // contract_id -> req_id
   const contractToReqRef = useRef<Record<number, number>>({});
@@ -822,7 +859,7 @@ const lastAuto1xPairRef = useRef<Pair | null>(null);
 
   const [ticks, setTicks] = useState<number[]>([]);
 
-  const [activeStrategy, setActiveStrategy] = useState<"matches" | "overunder" | "risefall" | null>(null);
+  const [activeStrategy, setActiveStrategy] = useState<"matches" | "overunder" | "risefall" | "mspider" | null>(null);
 useEffect(() => {
   activeStrategyRef.current = activeStrategy;
 }, [activeStrategy]);
@@ -1075,8 +1112,9 @@ const resetPairNow = (p: Pair) => {
 
     authorizedRef.current = false;
     buyAckWaitersRef.current = {};
-    contractToReqRef.current = {};
-    reqInfoRef.current = {};
+proposalPreviewWaitersRef.current = {};
+contractToReqRef.current = {};
+reqInfoRef.current = {};
 
    pairDigitsRef.current = Object.fromEntries(PAIRS.map((p) => [p, []])) as unknown as Record<Pair, number[]>;
    pairQuotesRef.current = Object.fromEntries(PAIRS.map((p) => [p, []])) as unknown as Record<Pair, number[]>;
@@ -1153,6 +1191,7 @@ if (
   activeStrategyRef.current !== "matches" &&
   activeStrategyRef.current !== "overunder" &&
   activeStrategyRef.current !== "risefall" &&
+  activeStrategyRef.current !== "mspider" &&
   !metroLoopRef.current
 ) return;
 
@@ -1184,20 +1223,24 @@ pairQuotesRef.current[symbol] = nextQuotes;
   if (symbol === selectedPairRef.current) setTicks(next);
 }
 
-      // proposal -> buy
-      if (data.msg_type === "proposal") {
+     // proposal preview or proposal -> buy
+if (data.msg_type === "proposal") {
   const req_id: number | undefined = data.req_id;
   const proposalId: string | undefined = data.proposal?.id;
   if (!req_id || !proposalId) return;
 
+  if (proposalPreviewWaitersRef.current[req_id]) {
+    proposalPreviewWaitersRef.current[req_id].resolve(data.proposal);
+    delete proposalPreviewWaitersRef.current[req_id];
+    return;
+  }
+
   const info = reqInfoRef.current[req_id];
   const stakeForReq = info?.stake ?? stake;
 
-  // ⚡ Turbo trades → BUY QUEUE
   if (info?.turbo) {
     enqueueBuy(req_id, proposalId, stakeForReq);
   } else {
-    // ✅ Non-turbo trades (3x, manual, MetroX) → immediate BUY (old behavior)
     safeSend({ buy: proposalId, price: stakeForReq, req_id });
   }
 
@@ -1312,7 +1355,127 @@ pairQuotesRef.current[symbol] = nextQuotes;
     batchStartIndex: 1,
   });
 };
- const placeTrade = (type: TradeType, durationTicks: number) => {
+const placeHigherLowerTrade = ({
+  direction,
+  durationTicks,
+  barrier,
+  customStake,
+}: {
+  direction: "Higher" | "Lower";
+  durationTicks: number;
+  barrier: string;
+  customStake?: number;
+}) => {
+  const tradeStake = customStake ?? stake;
+
+  if (!tradeStake || tradeStake <= 0) return alert("Enter a stake amount");
+  if (!barrier || !String(barrier).trim()) return alert("Set a barrier value first");
+  if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+    return alert("WebSocket not connected yet");
+  }
+  if (!authorizedRef.current) return alert("Not authorized yet");
+
+  const req_id = newReqId();
+
+  const trade: Trade = {
+    id: req_id,
+    symbol: selectedPair,
+    digit: 0,
+    type: direction,
+    stake: tradeStake,
+    durationTicks,
+    result: "Pending",
+    createdAt: Date.now(),
+    source: "M-Spider",
+  };
+
+  setTradeHistory((prev) => [trade, ...prev]);
+
+  reqInfoRef.current[req_id] = {
+    symbol: selectedPair,
+    digit: 0,
+    type: direction,
+    stake: tradeStake,
+  };
+
+  const { duration, duration_unit } = parseMSpiderDuration(String(durationTicks));
+
+safeSend({
+  proposal: 1,
+  amount: tradeStake,
+  basis: "stake",
+  contract_type: getContractType(direction, false),
+  currency: currency || "USD",
+  symbol: selectedPair,
+  duration,
+  duration_unit,
+  barrier: String(barrier),
+  req_id,
+});
+};
+const requestHigherLowerPreview = async ({
+  direction,
+  durationValue,
+  barrier,
+  customStake,
+}: {
+  direction: "Higher" | "Lower";
+  durationValue: string;
+  barrier: string;
+  customStake: number;
+}) => {
+  if (!customStake || customStake <= 0) return { payout: 0, profit: 0 };
+  if (!barrier || !String(barrier).trim()) return { payout: 0, profit: 0 };
+  if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return { payout: 0, profit: 0 };
+  if (!authorizedRef.current) return { payout: 0, profit: 0 };
+
+  const req_id = newReqId();
+  const { duration, duration_unit } = parseMSpiderDuration(durationValue);
+
+  const proposal = await new Promise<any>((resolve, reject) => {
+    proposalPreviewWaitersRef.current[req_id] = {
+      resolve,
+      reject: (msg: string) => reject(new Error(msg)),
+    };
+
+    const ok = safeSend({
+      proposal: 1,
+      amount: customStake,
+      basis: "stake",
+      contract_type: getContractType(direction, false),
+      currency: currency || "USD",
+      symbol: selectedPair,
+      duration,
+      duration_unit,
+      barrier: String(barrier),
+      req_id,
+    });
+
+    if (!ok) {
+      delete proposalPreviewWaitersRef.current[req_id];
+      reject(new Error("WebSocket not connected"));
+      return;
+    }
+
+    window.setTimeout(() => {
+      if (proposalPreviewWaitersRef.current[req_id]) {
+        delete proposalPreviewWaitersRef.current[req_id];
+        reject(new Error("Proposal preview timeout"));
+      }
+    }, 4000);
+  });
+
+  const payout = Number(proposal?.payout ?? 0);
+  const profit = Number((payout - customStake).toFixed(2));
+
+  return {
+    payout: Number.isFinite(payout) ? payout : 0,
+    profit: Number.isFinite(profit) ? profit : 0,
+  };
+};
+
+const placeTrade = (type: TradeType, durationTicks: number) => {
+  
   const needsDigit =
     type === "Matches" || type === "Differs" || type === "Over" || type === "Under";
 
@@ -2097,6 +2260,7 @@ const toggleSpiderRandomAuto = async () => {
   if (activeStrategy === "matches" && !isStrategyEnabledForViewer("matches")) setActiveStrategy(null);
   if (activeStrategy === "overunder" && !isStrategyEnabledForViewer("overunder")) setActiveStrategy(null);
   if (activeStrategy === "risefall" && !isStrategyEnabledForViewer("risefall")) setActiveStrategy(null);
+  if (activeStrategy === "mspider" && !isStrategyEnabledForViewer("mspider")) setActiveStrategy(null);
   // eslint-disable-next-line react-hooks/exhaustive-deps
 }, [strategyFlags, isAdmin]);
 
@@ -2200,7 +2364,7 @@ const toggleSpiderRandomAuto = async () => {
         </header>
 
         {/* PAGE HEADER */}
-        <section className="mx-auto w-full max-w-7xl px-4 sm:px-6 lg:px-8 py-6">
+        <section className="mx-auto w-full max-w-[1800px] px-4 sm:px-6 lg:px-8 py-6">
           <div className="glass-panel p-6 flex justify-between items-center
   bg-gradient-to-r from-orange-500/30 via-orange-600/20 to-purple-700/20">
             <div>
@@ -2309,11 +2473,20 @@ const toggleSpiderRandomAuto = async () => {
   />
 )}
 
+{isStrategyEnabledForViewer("mspider") && (
+  <StrategyRow
+    title="M-Spider"
+    description="Higher/Lower strategy"
+    active={activeStrategy === "mspider"}
+    onToggle={() => setActiveStrategy(activeStrategy === "mspider" ? null : "mspider")}
+  />
+)}
+
             </div>
           </div>
 
           {/* RIGHT */}
-          <div className="rounded-2xl p-0 border border-white/10 overflow-hidden shadow-[0_0_0_1px_rgba(255,255,255,0.06)]">
+          <div className="min-w-0 rounded-1xl p-0 border border-white/10 overflow-hidden shadow-[0_0_0_1px_rgba(255,255,255,0.06)]">
 {activeStrategy === "matches" && isStrategyEnabledForViewer("matches") && (
   <MetroXPanel
     key={metroXResetKey}
@@ -2415,6 +2588,27 @@ const toggleSpiderRandomAuto = async () => {
   </div>
 )}
 
+{activeStrategy === "mspider" && isStrategyEnabledForViewer("mspider") && (
+  <div className="bg-[#13233d] p-6 flex flex-col min-h-[520px]">
+   <MSpiderPanel
+  header="M-Spider Analysis"
+  selectedPair={selectedPair}
+  setSelectedPair={(p: Pair) => {
+    resetPairNow(p);
+    setSelectedPair(p);
+  }}
+  stake={stake}
+  setStake={setStake}
+  currency={currency}
+onPlaceHigherLowerTrade={placeHigherLowerTrade}
+requestHigherLowerPreview={requestHigherLowerPreview}
+tradeHistory={tradeHistory}
+  onClearHistory={() => setTradeHistory([])}
+  pairQuotesRef={pairQuotesRef}
+/>
+  </div>
+)}
+
             {/* ✅ if user selects a disabled strategy, show the default empty state */}
             {!activeStrategy && (
               <div className="bg-gradient-to-br from-[#1b2235] to-[#121826] p-6 min-h-[520px] flex items-center justify-center">
@@ -2438,6 +2632,1089 @@ const toggleSpiderRandomAuto = async () => {
 
 
 /* ================= STRATEGY TOGGLE ================= */
+function MSpiderPanel({
+  header,
+  selectedPair,
+  setSelectedPair,
+  stake,
+  setStake,
+  currency,
+onPlaceHigherLowerTrade,
+requestHigherLowerPreview,
+tradeHistory,
+  onClearHistory,
+  pairQuotesRef,
+}: {
+  header: string;
+  selectedPair: Pair;
+  setSelectedPair: (p: Pair) => void;
+  stake: number;
+  setStake: React.Dispatch<React.SetStateAction<number>>;
+  currency: string;
+  onPlaceHigherLowerTrade: (args: {
+  direction: "Higher" | "Lower";
+  durationTicks: number;
+  barrier: string;
+  customStake?: number;
+}) => void;
+requestHigherLowerPreview: (args: {
+  direction: "Higher" | "Lower";
+  durationValue: string;
+  barrier: string;
+  customStake: number;
+}) => Promise<{ payout: number; profit: number }>;
+  tradeHistory: Trade[];
+  onClearHistory: () => void;
+  pairQuotesRef: React.MutableRefObject<Record<Pair, number[]>>;
+}) {
+  const quotes = pairQuotesRef.current[selectedPair] ?? [];
+  const latestQuote = quotes.length ? quotes[quotes.length - 1] : 0;
+
+  const [duration, setDuration] = useState<string>("5");
+  const [lowerStake, setLowerStake] = useState<number>(stake);
+  const [autoTradingEnabled, setAutoTradingEnabled] = useState(false);
+  const [autoTradeMinConfidence, setAutoTradeMinConfidence] = useState<number>(60);
+  const autoTradeLastAtRef = useRef<number>(0);
+  const [barrierMode, setBarrierMode] = useState<"offset" | "absolute">("offset");
+  const [halfBarrier, setHalfBarrier] = useState(false);
+  const [higherBarrier, setHigherBarrier] = useState<string>("+0.12");
+  const [lowerBarrier, setLowerBarrier] = useState<string>("+0.12");
+
+  const durationOptions = [
+    { value: "1", label: "1 Tick" },
+    { value: "2", label: "2 Ticks" },
+    { value: "3", label: "3 Ticks" },
+    { value: "4", label: "4 Ticks" },
+    { value: "5", label: "5 Ticks" },
+    { value: "15s", label: "15 Seconds" },
+    { value: "30s", label: "30 Seconds" },
+    { value: "1m", label: "1 Minute" },
+    { value: "2m", label: "2 Minutes" },
+    { value: "5m", label: "5 Minutes" },
+    { value: "10m", label: "10 Minutes" },
+    { value: "15m", label: "15 Minutes" },
+    { value: "30m", label: "30 Minutes" },
+    { value: "1h", label: "1 Hour" },
+  ];
+
+  const offsetBasePresets = [0.5, 0.25, 0.12, 0.05, -0.05, -0.12, -0.25, -0.5];
+  const pip = Math.max(2, latestQuote ? String(latestQuote).split(".")[1]?.length ?? 2 : 2);
+
+  const normalizeOffset = (value: number) => {
+    const decimals = halfBarrier ? 3 : 2;
+    const rounded = Number(value.toFixed(decimals));
+    return rounded === 0 ? 0 : rounded;
+  };
+
+  const formatOffset = (value: number) => {
+    const normalized = normalizeOffset(value);
+    const abs = Math.abs(normalized).toFixed(2);
+    const sign = normalized >= 0 ? "+" : "-";
+    return `${sign}${abs}`;
+  };
+
+  const parseOffsetValue = (value: string) => {
+    const n = Number.parseFloat(value);
+    return Number.isFinite(n) ? normalizeOffset(n) : 0.12;
+  };
+
+  const offsetPresets = useMemo(
+    () => offsetBasePresets.map((v) => normalizeOffset(halfBarrier ? v / 2 : v)),
+    [halfBarrier]
+  );
+
+  const absolutePresets = useMemo(() => {
+    if (!latestQuote) return [] as number[];
+    return offsetPresets
+      .map((v) => Number((latestQuote + v).toFixed(pip)))
+      .sort((a, b) => a - b);
+  }, [latestQuote, offsetPresets, pip]);
+
+  const higherDisplay = useMemo(() => {
+    if (barrierMode === "offset") return higherBarrier;
+    const n = Number.parseFloat(higherBarrier);
+    return Number.isFinite(n) ? n.toFixed(pip) : latestQuote.toFixed(pip);
+  }, [barrierMode, higherBarrier, latestQuote, pip]);
+
+  const lowerDisplay = useMemo(() => {
+    if (barrierMode === "offset") return lowerBarrier;
+    const n = Number.parseFloat(lowerBarrier);
+    return Number.isFinite(n) ? n.toFixed(pip) : latestQuote.toFixed(pip);
+  }, [barrierMode, lowerBarrier, latestQuote, pip]);
+
+ useEffect(() => {
+  const defaultOffset = formatOffset(halfBarrier ? 0.06 : 0.12);
+
+  if (barrierMode === "offset") {
+    setHigherBarrier(defaultOffset);
+    setLowerBarrier(defaultOffset);
+    return;
+  }
+
+  if (!latestQuote) return;
+
+  const base = Number((latestQuote + (halfBarrier ? 0.06 : 0.12)).toFixed(pip));
+  const formatted = base.toFixed(pip);
+  setHigherBarrier(formatted);
+  setLowerBarrier(formatted);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+}, [barrierMode, halfBarrier]);
+
+  const changeOffsetBarrier = (
+    current: string,
+    setValue: React.Dispatch<React.SetStateAction<string>>,
+    direction: -1 | 1
+  ) => {
+    const currentOffset = parseOffsetValue(current);
+    const options = [...offsetPresets].sort((a, b) => a - b);
+
+    let idx = options.findIndex((v) => Math.abs(v - currentOffset) < 0.0001);
+
+    if (idx === -1) {
+      idx = options.findIndex((v) => v >= currentOffset);
+      if (idx === -1) idx = options.length - 1;
+    }
+
+    const nextIdx = Math.max(0, Math.min(options.length - 1, idx + direction));
+    setValue(formatOffset(options[nextIdx]));
+  };
+
+  const barrierChips =
+    barrierMode === "offset"
+      ? offsetPresets.map((v) => ({
+          key: `offset-${v}`,
+          label: formatOffset(v),
+          value: formatOffset(v),
+        }))
+      : absolutePresets.map((v) => ({
+          key: `absolute-${v}`,
+          label: v.toFixed(pip),
+          value: v.toFixed(pip),
+        }));
+        const chartQuotes = quotes.slice(-30);
+const anchorQuote = chartQuotes.length > 0 ? chartQuotes[0] : latestQuote;
+
+const higherBarrierValue =
+  barrierMode === "offset"
+    ? Number((latestQuote + parseOffsetValue(higherBarrier)).toFixed(pip))
+    : Number.parseFloat(higherBarrier || String(latestQuote || 0));
+
+const lowerBarrierValue =
+  barrierMode === "offset"
+    ? Number((latestQuote + parseOffsetValue(lowerBarrier)).toFixed(pip))
+    : Number.parseFloat(lowerBarrier || String(latestQuote || 0));
+
+const recentMoves =
+  chartQuotes.length > 1
+    ? chartQuotes.slice(1).map((q, i) => ({
+        key: `${i}-${q}`,
+        dir: q >= chartQuotes[i] ? "H" : "L",
+      }))
+    : [];
+
+const higherCount = recentMoves.filter((m) => m.dir === "H").length;
+const lowerCount = recentMoves.filter((m) => m.dir === "L").length;
+const totalMoves = recentMoves.length || 1;
+const higherPct = (higherCount / totalMoves) * 100;
+const lowerPct = (lowerCount / totalMoves) * 100;
+
+const prediction = lowerPct > higherPct ? "LOWER" : "HIGHER";
+const [higherPreview, setHigherPreview] = useState<{ payout: number; profit: number }>({
+  payout: 0,
+  profit: 0,
+});
+const [lowerPreview, setLowerPreview] = useState<{ payout: number; profit: number }>({
+  payout: 0,
+  profit: 0,
+});
+
+const combinedStake = Number((stake + lowerStake).toFixed(2));
+const higherPayout = Number(higherPreview.payout.toFixed(2));
+const lowerPayout = Number(lowerPreview.payout.toFixed(2));
+const higherProfit = Number(higherPreview.profit.toFixed(2));
+const lowerProfit = Number(lowerPreview.profit.toFixed(2));
+const combinedPayout = Number((higherPayout + lowerPayout).toFixed(2));
+const confidence = Math.max(higherPct, lowerPct);
+const autoTradeCooldownMs = 30_000;
+const autoTradeReady =
+  confidence >= autoTradeMinConfidence &&
+  Date.now() - autoTradeLastAtRef.current >= autoTradeCooldownMs;
+
+useEffect(() => {
+  let cancelled = false;
+
+  const run = async () => {
+    if (!stake || stake <= 0 || !lowerStake || lowerStake <= 0) {
+      if (!cancelled) {
+        setHigherPreview({ payout: 0, profit: 0 });
+        setLowerPreview({ payout: 0, profit: 0 });
+      }
+      return;
+    }
+
+    try {
+      const [higher, lower] = await Promise.all([
+        requestHigherLowerPreview({
+          direction: "Higher",
+          durationValue: duration,
+          barrier: higherDisplay,
+          customStake: stake,
+        }),
+        requestHigherLowerPreview({
+          direction: "Lower",
+          durationValue: duration,
+          barrier: lowerDisplay,
+          customStake: lowerStake,
+        }),
+      ]);
+
+      if (!cancelled) {
+        setHigherPreview(higher);
+        setLowerPreview(lower);
+      }
+    } catch {
+      if (!cancelled) {
+        setHigherPreview({ payout: 0, profit: 0 });
+        setLowerPreview({ payout: 0, profit: 0 });
+      }
+    }
+  };
+
+  const t = window.setTimeout(run, 180);
+
+  return () => {
+    cancelled = true;
+    window.clearTimeout(t);
+  };
+}, [requestHigherLowerPreview, duration, higherDisplay, lowerDisplay, stake, lowerStake, selectedPair]);
+const zoneLabel =
+  latestQuote > higherBarrierValue
+    ? "Above Higher"
+    : latestQuote < lowerBarrierValue
+    ? "Below Lower"
+    : "Between";
+
+const chartMin = Math.min(...chartQuotes, lowerBarrierValue, higherBarrierValue, latestQuote || 0);
+const chartMax = Math.max(...chartQuotes, lowerBarrierValue, higherBarrierValue, latestQuote || 0);
+const chartRange = Math.max(chartMax - chartMin, 0.0001);
+
+const pathD = chartQuotes
+  .map((q, i) => {
+    const x = chartQuotes.length <= 1 ? 0 : (i / (chartQuotes.length - 1)) * 100;
+    const y = 100 - ((q - chartMin) / chartRange) * 100;
+    return `${i === 0 ? "M" : "L"}${x},${y}`;
+  })
+  .join(" ");
+
+const latestY = 100 - ((latestQuote - chartMin) / chartRange) * 100;
+const higherY = 100 - ((higherBarrierValue - chartMin) / chartRange) * 100;
+const lowerY = 100 - ((lowerBarrierValue - chartMin) / chartRange) * 100;
+const clampY = (y: number) => Math.max(6, Math.min(94, y));
+const higherLabelY = clampY(higherY - 3);
+const lowerLabelY = clampY(lowerY - 3);
+const latestLabelY = clampY(latestY - 3);
+
+useEffect(() => {
+  if (!autoTradingEnabled) return;
+  if (!autoTradeReady) return;
+
+  autoTradeLastAtRef.current = Date.now();
+
+  onPlaceHigherLowerTrade({
+    direction: "Higher",
+    durationTicks: 5,
+    barrier: higherDisplay,
+    customStake: stake,
+  });
+
+  onPlaceHigherLowerTrade({
+    direction: "Lower",
+    durationTicks: 5,
+    barrier: lowerDisplay,
+    customStake: lowerStake,
+  });
+}, [
+  autoTradingEnabled,
+  autoTradeReady,
+  autoTradeMinConfidence,
+  higherDisplay,
+  lowerDisplay,
+  stake,
+  lowerStake,
+  onPlaceHigherLowerTrade,
+]);
+  return (
+    <div className="rounded-[28px] border border-cyan-500/30 bg-[linear-gradient(135deg,rgba(29,40,73,0.92),rgba(5,17,46,0.96)_55%,rgba(2,13,36,0.98))] p-8 shadow-[0_0_40px_rgba(0,0,0,0.25)]">
+      <div className="flex items-start justify-between gap-4">
+        <div className="flex items-start gap-4">
+          <div className="flex h-14 w-14 items-center justify-center rounded-2xl border border-cyan-400/40 bg-cyan-500/15 text-cyan-300">
+            <svg
+              viewBox="0 0 24 24"
+              className="h-7 w-7"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.8"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <path d="M3 13h4l2.5-6 4 10 2.5-4H21" />
+            </svg>
+          </div>
+
+          <div>
+            <h2 className="text-[2rem] font-bold leading-none text-white">{header}</h2>
+            <p className="mt-2 text-lg text-white/65">Real-time price movement prediction</p>
+          </div>
+        </div>
+
+        <div className="inline-flex items-center gap-3 rounded-full border border-sky-400/50 bg-sky-500/15 px-5 py-2 text-sky-300">
+          <span className="h-3 w-3 rounded-full bg-sky-400" />
+          <span className="text-sm font-semibold tracking-wide">Live</span>
+        </div>
+      </div>
+
+      <div className="mt-8 grid grid-cols-1 gap-6 md:grid-cols-2">
+        <div>
+          <label className="mb-3 block text-[1.05rem] font-medium text-white/85">Market</label>
+          <select
+            value={selectedPair}
+            onChange={(e) => setSelectedPair(e.target.value as Pair)}
+            className="h-14 w-full rounded-xl border border-white/10 bg-slate-800/70 px-4 text-[1.05rem] text-white outline-none transition focus:border-cyan-400/50"
+          >
+            {RISE_FALL_PAIRS.map((pair) => (
+              <option key={pair} value={pair}>
+                {pair}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div>
+          <label className="mb-3 block text-[1.05rem] font-medium text-white/85">Duration</label>
+          <select
+            value={duration}
+            onChange={(e) => setDuration(e.target.value)}
+            className="h-14 w-full rounded-xl border border-white/10 bg-slate-800/70 px-4 text-[1.05rem] text-white outline-none transition focus:border-cyan-400/50"
+          >
+            {durationOptions.map((opt) => (
+              <option key={opt.value} value={opt.value}>
+                {opt.label}
+              </option>
+            ))}
+          </select>
+        </div>
+      </div>
+
+      <div className="mt-8 grid grid-cols-1 gap-6 md:grid-cols-2">
+        <div>
+          <label className="mb-3 flex items-center gap-2 text-[1.05rem] font-medium text-emerald-300">
+            <span>↗</span>
+            <span>Higher Stake ($)</span>
+          </label>
+          <input
+            type="number"
+            min={0.35}
+            step="0.01"
+            value={stake}
+            onChange={(e) => {
+              const v = Number(e.target.value);
+              if (Number.isFinite(v)) setStake(v);
+            }}
+            className="h-16 w-full rounded-2xl border border-emerald-400/25 bg-slate-800/70 px-5 text-[1.1rem] text-white outline-none transition focus:border-emerald-400/45"
+          />
+        </div>
+
+        <div>
+          <label className="mb-3 flex items-center gap-2 text-[1.05rem] font-medium text-rose-300">
+            <span>↘</span>
+            <span>Lower Stake ($)</span>
+          </label>
+          <input
+            type="number"
+            min={0.35}
+            step="0.01"
+            value={lowerStake}
+            onChange={(e) => {
+              const v = Number(e.target.value);
+              if (Number.isFinite(v)) setLowerStake(v);
+            }}
+            className="h-16 w-full rounded-2xl border border-rose-400/25 bg-slate-800/70 px-5 text-[1.1rem] text-white outline-none transition focus:border-rose-400/45"
+          />
+        </div>
+      </div>
+
+      <div className="mt-8">
+        <label className="mb-4 block text-[1.05rem] font-medium text-white/85">Barrier Type</label>
+
+        <div className="inline-flex rounded-2xl border border-white/10 bg-slate-800/55 p-1">
+          <button
+            type="button"
+            onClick={() => setBarrierMode("offset")}
+            className={`min-w-[210px] rounded-xl px-8 py-4 text-lg font-medium transition ${
+              barrierMode === "offset"
+                ? "bg-sky-500/30 text-sky-300 shadow-[inset_0_0_18px_rgba(14,165,233,0.12)]"
+                : "text-white/75"
+            }`}
+          >
+            Offset
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setBarrierMode("absolute")}
+            className={`min-w-[210px] rounded-xl px-8 py-4 text-lg font-medium transition ${
+              barrierMode === "absolute"
+                ? "bg-sky-500/30 text-sky-300 shadow-[inset_0_0_18px_rgba(14,165,233,0.12)]"
+                : "text-white/75"
+            }`}
+          >
+            Absolute
+          </button>
+        </div>
+      </div>
+
+      <div className="mt-8 flex justify-center">
+        <button
+          type="button"
+          onClick={() => setHalfBarrier((v) => !v)}
+          className={`inline-flex items-center gap-4 rounded-2xl border px-6 py-3 text-lg transition ${
+            halfBarrier
+              ? "border-amber-400/40 bg-amber-500/12 text-amber-300"
+              : "border-white/10 bg-slate-800/55 text-white/80"
+          }`}
+        >
+          <span
+            className={`relative h-8 w-16 rounded-full transition ${
+              halfBarrier ? "bg-amber-500/35" : "bg-slate-600/60"
+            }`}
+          >
+            <span
+              className={`absolute top-1 h-6 w-6 rounded-full transition ${
+                halfBarrier ? "left-9 bg-amber-300" : "left-1 bg-white/70"
+              }`}
+            />
+          </span>
+          <span>Half Barrier</span>
+          {halfBarrier && (
+            <span className="rounded-lg bg-amber-400/15 px-3 py-1 text-base font-semibold text-amber-300">
+              /2
+            </span>
+          )}
+        </button>
+      </div>
+
+      <div className="mt-8 grid grid-cols-1 gap-5 xl:grid-cols-2">
+        <div className="rounded-[24px] border border-emerald-400/25 bg-slate-900/35 p-5 xl:min-h-[250px]">
+          <div className="mb-5 flex items-center justify-between gap-4">
+            <div className="text-[1.05rem] font-medium text-emerald-300">↗ Higher Barrier</div>
+            <div className="text-[1.7rem] font-medium tracking-tight text-white/45">
+              {latestQuote ? latestQuote.toFixed(pip) : "0.00"}
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2">
+            {barrierMode === "offset" && (
+              <button
+                type="button"
+                onClick={() => changeOffsetBarrier(higherBarrier, setHigherBarrier, -1)}
+                className="flex h-11 w-11 items-center justify-center rounded-2xl border border-white/10 bg-slate-700/45 text-3xl text-white/80 shrink-0"
+              >
+                −
+              </button>
+            )}
+
+            <input
+  type="number"
+  step={barrierMode === "offset" ? "0.01" : "any"}
+  value={
+    barrierMode === "offset"
+      ? parseOffsetValue(higherBarrier)
+      : Number.parseFloat(higherBarrier || String(latestQuote || 0))
+  }
+  onChange={(e) => {
+    const v = Number(e.target.value);
+    if (!Number.isFinite(v)) return;
+
+    if (barrierMode === "offset") {
+      setHigherBarrier(formatOffset(v));
+    } else {
+      setHigherBarrier(v.toFixed(pip));
+    }
+  }}
+  className="h-[60px] min-w-0 flex-1 rounded-2xl border border-emerald-400/25 bg-slate-800/65 px-2 text-[1.05rem] text-white outline-none transition focus:border-emerald-400/45"
+/>
+
+            {barrierMode === "offset" && (
+              <button
+                type="button"
+                onClick={() => changeOffsetBarrier(higherBarrier, setHigherBarrier, 1)}
+                className="flex h-11 w-11 items-center justify-center rounded-2xl border border-white/10 bg-slate-700/45 text-3xl text-white/80 shrink-0"
+              >
+                +
+              </button>
+            )}
+          </div>
+
+          <div className="mt-3 flex flex-wrap gap-2">
+            {barrierChips.map((chip) => (
+              <button
+                key={`higher-${chip.key}`}
+                type="button"
+                onClick={() => setHigherBarrier(chip.value)}
+                className={`rounded-xl border px-4 py-2.5 text-base font-medium transition ${
+                  higherDisplay === chip.value
+                    ? "border-emerald-400/45 bg-emerald-500/15 text-emerald-300"
+                    : "border-white/10 bg-slate-800/60 text-white/70"
+                }`}
+              >
+                {chip.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="rounded-[24px] border border-rose-400/25 bg-slate-900/35 p-5 xl:min-h-[250px]">
+          <div className="mb-4 flex items-center justify-between gap-4">
+            <div className="text-[1.05rem] font-medium text-rose-300">↘ Lower Barrier</div>
+            <div className="text-[1.7rem] font-medium tracking-tight text-white/45">
+              {latestQuote ? latestQuote.toFixed(pip) : "0.00"}
+            </div>
+          </div>
+
+          <div className="flex items-center gap-3">
+            {barrierMode === "offset" && (
+              <button
+                type="button"
+                onClick={() => changeOffsetBarrier(lowerBarrier, setLowerBarrier, -1)}
+                className="flex h-11 w-11 items-center justify-center rounded-2xl border border-white/10 bg-slate-700/45 text-3xl text-white/80 shrink-0"
+              >
+                −
+              </button>
+            )}
+
+            <input
+  type="number"
+  step={barrierMode === "offset" ? "0.01" : "any"}
+  value={
+    barrierMode === "offset"
+      ? parseOffsetValue(lowerBarrier)
+      : Number.parseFloat(lowerBarrier || String(latestQuote || 0))
+  }
+  onChange={(e) => {
+    const v = Number(e.target.value);
+    if (!Number.isFinite(v)) return;
+
+    if (barrierMode === "offset") {
+      setLowerBarrier(formatOffset(v));
+    } else {
+      setLowerBarrier(v.toFixed(pip));
+    }
+  }}
+  className="h-[60px] min-w-0 flex-1 rounded-2xl border border-rose-400/25 bg-slate-800/65 px-2 text-[1.05rem] text-white outline-none transition focus:border-rose-400/45"
+/>
+
+            {barrierMode === "offset" && (
+              <button
+                type="button"
+                onClick={() => changeOffsetBarrier(lowerBarrier, setLowerBarrier, 1)}
+                className="flex h-11 w-11 items-center justify-center rounded-2xl border border-white/10 bg-slate-700/45 text-3xl text-white/80 shrink-0"
+              >
+                +
+              </button>
+            )}
+          </div>
+
+          <div className="mt-3 flex flex-wrap gap-2">
+            {barrierChips.map((chip) => (
+              <button
+                key={`lower-${chip.key}`}
+                type="button"
+                onClick={() => setLowerBarrier(chip.value)}
+                className={`rounded-xl border px-4 py-2.5 text-base font-medium transition ${
+                  lowerDisplay === chip.value
+                    ? "border-rose-400/45 bg-rose-500/15 text-rose-300"
+                    : "border-white/10 bg-slate-800/60 text-white/70"
+                }`}
+              >
+                {chip.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      <div className="mt-8 rounded-[28px] border border-white/10 bg-slate-900/25 p-5 shadow-[0_0_0_1px_rgba(255,255,255,0.03)]">
+  <div className="flex items-center justify-between gap-4">
+    <div className="flex items-center gap-3">
+      <div className="text-cyan-300 text-2xl">⌁</div>
+      <div>
+        <div className="text-[1.1rem] font-semibold text-white/90">
+          Price Chart <span className="text-white/40 font-normal">Last 30 ticks</span>
+        </div>
+      </div>
+    </div>
+
+    <div className="text-right">
+      <div className="text-[2rem] font-bold text-emerald-300 leading-none">
+        {latestQuote.toFixed(pip)}
+      </div>
+      <div className="mt-2 text-[1.1rem] text-emerald-300/90">
+        {chartQuotes.length > 1
+          ? `${latestQuote - anchorQuote >= 0 ? "+" : ""}${(latestQuote - anchorQuote).toFixed(pip)}`
+          : `+0.${"0".repeat(pip)}`}
+      </div>
+    </div>
+  </div>
+
+  <div className="mt-5 rounded-2xl border border-white/10 bg-slate-800/55 px-4 py-3 flex items-center justify-between gap-4">
+    <div className="text-white/45 text-[1.05rem]">
+      Barrier anchor: <span className="text-white/80">{anchorQuote.toFixed(pip)}</span>
+    </div>
+    <button
+      type="button"
+      onClick={() => {
+        const nextValue =
+          barrierMode === "offset"
+            ? formatOffset(halfBarrier ? 0.06 : 0.12)
+            : latestQuote.toFixed(pip);
+        setHigherBarrier(nextValue);
+        setLowerBarrier(nextValue);
+      }}
+      className="text-cyan-300 text-[1.05rem] font-semibold hover:text-cyan-200 transition"
+    >
+      Reset to current
+    </button>
+  </div>
+
+  <div
+    className={`mt-4 rounded-t-2xl border border-b-0 px-5 py-3 text-[1.05rem] font-semibold ${
+      zoneLabel === "Above Higher"
+        ? "border-emerald-400/30 bg-emerald-500/10 text-emerald-300"
+        : zoneLabel === "Below Lower"
+        ? "border-rose-400/30 bg-rose-500/10 text-rose-300"
+        : "border-amber-400/30 bg-amber-500/10 text-amber-300"
+    }`}
+  >
+    ●{" "}
+    {zoneLabel === "Above Higher"
+      ? `PRICE IS ABOVE YOUR HIGHER BARRIER (${higherBarrierValue.toFixed(pip)})`
+      : zoneLabel === "Below Lower"
+      ? `PRICE IS BELOW YOUR LOWER BARRIER (${lowerBarrierValue.toFixed(pip)})`
+      : `PRICE IS BETWEEN YOUR BARRIERS (${lowerBarrierValue.toFixed(pip)} - ${higherBarrierValue.toFixed(pip)})`}
+  </div>
+
+  <div className="rounded-b-2xl border border-white/10 bg-slate-900/35 overflow-hidden">
+    <div className="p-5">
+      <div className="h-[300px] sm:h-[320px] lg:h-[340px] w-full rounded-2xl border border-white/5 bg-[linear-gradient(180deg,rgba(32,44,78,0.8),rgba(21,29,56,0.9))] px-3 py-4 sm:px-4">
+        <svg viewBox="0 0 100 100" preserveAspectRatio="none" className="h-full w-full overflow-visible">
+          <defs>
+            <linearGradient id="mspiderAreaFill" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor="rgba(255,66,99,0.18)" />
+              <stop offset="100%" stopColor="rgba(255,66,99,0.02)" />
+            </linearGradient>
+          </defs>
+
+          {[20, 40, 60, 80].map((y) => (
+            <line
+              key={`grid-${y}`}
+              x1="0"
+              y1={y}
+              x2="100"
+              y2={y}
+              stroke="rgba(96,165,250,0.12)"
+              strokeDasharray="2 2"
+              vectorEffect="non-scaling-stroke"
+            />
+          ))}
+
+          <line
+            x1="0"
+            y1={higherY}
+            x2="100"
+            y2={higherY}
+            stroke="rgba(52,211,153,0.9)"
+            strokeDasharray="3 2"
+            vectorEffect="non-scaling-stroke"
+          />
+          <g>
+  <rect
+    x="0.8"
+    y={higherLabelY - 5}
+    width="22"
+    height="7"
+    rx="1.6"
+    fill="rgba(16,185,129,0.16)"
+    stroke="rgba(52,211,153,0.55)"
+    strokeWidth="0.3"
+    vectorEffect="non-scaling-stroke"
+  />
+  <text
+    x="1.9"
+    y={higherLabelY}
+    fill="#34d399"
+    fontSize="3.1"
+    fontWeight="700"
+  >
+    HIGHER {higherBarrierValue.toFixed(pip)}
+  </text>
+</g>
+          <line
+            x1="0"
+            y1={lowerY}
+            x2="100"
+            y2={lowerY}
+            stroke="rgba(251,113,133,0.9)"
+            strokeDasharray="3 2"
+            vectorEffect="non-scaling-stroke"
+          />
+          <g>
+  <rect
+    x="77"
+    y={lowerLabelY - 5}
+    width="22"
+    height="7"
+    rx="1.6"
+    fill="rgba(244,63,94,0.16)"
+    stroke="rgba(251,113,133,0.55)"
+    strokeWidth="0.3"
+    vectorEffect="non-scaling-stroke"
+  />
+  <text
+    x="78.2"
+    y={lowerLabelY}
+    fill="#fb7185"
+    fontSize="3.1"
+    fontWeight="700"
+  >
+    LOWER {lowerBarrierValue.toFixed(pip)}
+  </text>
+</g>
+
+          {pathD && (
+            <>
+              <path d={`${pathD} L100,100 L0,100 Z`} fill="url(#mspiderAreaFill)" stroke="none" />
+              <path
+                d={pathD}
+                fill="none"
+                stroke="#ff4263"
+                strokeWidth="0.9"
+                vectorEffect="non-scaling-stroke"
+              />
+            </>
+          )}
+
+          {chartQuotes.length > 0 && (
+  <>
+    <g>
+      <rect
+        x="0.8"
+        y={latestLabelY - 5}
+        width="18"
+        height="7"
+        rx="1.6"
+        fill="rgba(244,63,94,0.16)"
+        stroke="rgba(251,113,133,0.55)"
+        strokeWidth="0.3"
+        vectorEffect="non-scaling-stroke"
+      />
+      <text
+        x="1.9"
+        y={latestLabelY}
+        fill="#fb7185"
+        fontSize="3.1"
+        fontWeight="700"
+      >
+        {latestQuote.toFixed(pip)}
+      </text>
+    </g>
+    <circle
+      cx="100"
+      cy={latestY}
+      r="1.5"
+      fill="#0f172a"
+      stroke="#ff4263"
+      strokeWidth="0.8"
+      vectorEffect="non-scaling-stroke"
+    />
+  </>
+)}
+        </svg>
+      </div>
+
+      <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-white/5 pt-4">
+        <div className="flex flex-wrap items-center gap-6 text-[1.05rem]">
+          <span className="text-white/80">
+            <span className="mr-2 text-rose-300">—</span>Price
+          </span>
+          <span className="text-emerald-300">
+            <span className="mr-2">- -</span>Higher Barrier
+          </span>
+          <span className="text-rose-300">
+            <span className="mr-2">- -</span>Lower Barrier
+          </span>
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 w-full lg:w-auto lg:min-w-[360px]">
+          <button
+            type="button"
+            className={`rounded-xl border px-4 py-2.5 text-[1rem] font-semibold transition ${
+              zoneLabel === "Above Higher"
+                ? "border-emerald-400/40 bg-emerald-500/10 text-emerald-300"
+                : "border-white/10 bg-slate-800/55 text-white/45"
+            }`}
+          >
+            Above Higher
+          </button>
+          <button
+            type="button"
+            className={`rounded-xl border px-4 py-2.5 text-[1rem] font-semibold transition ${
+              zoneLabel === "Between"
+                ? "border-amber-400/40 bg-amber-500/10 text-amber-300"
+                : "border-white/10 bg-slate-800/55 text-white/45"
+            }`}
+          >
+            Between
+          </button>
+          <button
+            type="button"
+            className={`rounded-xl border px-4 py-2.5 text-[1rem] font-semibold transition ${
+              zoneLabel === "Below Lower"
+                ? "border-rose-400/40 bg-rose-500/10 text-rose-300"
+                : "border-white/10 bg-slate-800/55 text-white/45"
+            }`}
+          >
+            Below Lower
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div className="mt-6 grid grid-cols-1 gap-4 md:grid-cols-2">
+  <div className="rounded-[24px] border border-emerald-400/25 bg-[linear-gradient(90deg,rgba(16,185,129,0.08),rgba(15,23,42,0.25))] p-6">
+    <div className="text-[1.05rem] font-medium text-emerald-300">↗ Higher</div>
+    <div className="mt-4 text-[3rem] font-bold leading-none text-emerald-300">
+      {higherPct.toFixed(1)}%
+    </div>
+    <div className="mt-3 text-[1.35rem] text-white/75">{higherCount} ticks</div>
+  </div>
+
+  <div className="rounded-[24px] border border-rose-400/25 bg-[linear-gradient(90deg,rgba(244,63,94,0.08),rgba(15,23,42,0.25))] p-6">
+    <div className="text-[1.05rem] font-medium text-rose-300">↘ Lower</div>
+    <div className="mt-4 text-[3rem] font-bold leading-none text-rose-300">
+      {lowerPct.toFixed(1)}%
+    </div>
+    <div className="mt-3 text-[1.35rem] text-white/75">{lowerCount} ticks</div>
+  </div>
+</div>
+
+<div className="mt-6 rounded-[24px] border border-white/10 bg-slate-900/25 p-6">
+  <div className="flex items-center gap-3">
+    <div className="text-cyan-300 text-2xl">⌗</div>
+    <div className="text-[1.1rem] font-semibold text-white/90">Recent Moves</div>
+  </div>
+
+  <div className="mt-5 flex flex-wrap gap-3">
+    {recentMoves.length ? (
+      recentMoves.map((move) => (
+        <div
+          key={move.key}
+          className={`flex h-11 min-w-[42px] items-center justify-center rounded-xl border px-3 text-[1.1rem] font-semibold ${
+            move.dir === "H"
+              ? "border-emerald-400/30 bg-emerald-500/10 text-emerald-300"
+              : "border-rose-400/30 bg-rose-500/10 text-rose-300"
+          }`}
+        >
+          {move.dir}
+        </div>
+      ))
+    ) : (
+      <div className="text-white/45">Waiting for price movement data...</div>
+    )}
+  </div>
+</div>
+
+<div className="mt-6 rounded-[24px] border border-rose-400/25 bg-[linear-gradient(90deg,rgba(244,63,94,0.08),rgba(15,23,42,0.25))] p-6">
+  <div className="flex items-center justify-between gap-4">
+    <div className="flex items-center gap-3">
+      <div className="text-cyan-300 text-2xl">◎</div>
+      <div className="text-[1.1rem] font-semibold text-white/90">Prediction</div>
+    </div>
+    <div className="text-[1.15rem] font-bold text-amber-300">
+      {confidence.toFixed(0)}% confidence
+    </div>
+  </div>
+
+  <div className="mt-5 flex items-center gap-4">
+    <div
+      className={`flex h-14 w-14 items-center justify-center rounded-full border text-3xl ${
+        prediction === "LOWER"
+          ? "border-rose-400/40 text-rose-300"
+          : "border-emerald-400/40 text-emerald-300"
+      }`}
+    >
+      {prediction === "LOWER" ? "↓" : "↑"}
+    </div>
+
+    <div>
+      <div
+        className={`text-[2rem] font-bold leading-none ${
+          prediction === "LOWER" ? "text-rose-300" : "text-emerald-300"
+        }`}
+      >
+        {prediction}
+      </div>
+      <div className="mt-2 text-[1.2rem] text-white/75">
+        {prediction === "LOWER"
+          ? "Next tick predicted to go lower than current"
+          : "Next tick predicted to go higher than current"}
+      </div>
+    </div>
+  </div>
+
+  <div className="mt-6 h-3 w-full overflow-hidden rounded-full bg-slate-800/80">
+    <div
+      className={`h-full rounded-full ${
+        prediction === "LOWER" ? "bg-rose-500" : "bg-emerald-500"
+      }`}
+      style={{ width: `${Math.max(12, Math.min(100, confidence))}%` }}
+    />
+  </div>
+</div>
+
+<div className="mt-6 grid grid-cols-1 gap-4 md:grid-cols-2">
+  <button
+    type="button"
+    onClick={() =>
+  onPlaceHigherLowerTrade({
+    direction: "Higher",
+    durationTicks: Number.parseInt(duration, 10) || 5,
+    barrier: higherDisplay,
+    customStake: stake,
+  })
+}
+    className="rounded-[22px] border border-emerald-400/30 bg-[linear-gradient(135deg,rgba(16,185,129,0.22),rgba(6,95,70,0.42))] px-6 py-5 text-left transition hover:border-emerald-300/50 hover:bg-[linear-gradient(135deg,rgba(16,185,129,0.28),rgba(6,95,70,0.5))]"
+  >
+    <div className="text-[1.2rem] font-bold tracking-wide text-white/80">HIGHER</div>
+    <div className="mt-2 text-[1.1rem] text-white/65">Payout: ${higherPayout.toFixed(2)}</div>
+    <div className="mt-1 text-[1.1rem] font-semibold text-white/75">Profit: {higherProfit >= 0 ? "+" : ""}${higherProfit.toFixed(2)}</div>
+  </button>
+
+  <button
+    type="button"
+    onClick={() =>
+  onPlaceHigherLowerTrade({
+    direction: "Lower",
+    durationTicks: Number.parseInt(duration, 10) || 5,
+    barrier: lowerDisplay,
+    customStake: lowerStake,
+  })
+}
+    className="rounded-[22px] border border-rose-400/30 bg-[linear-gradient(135deg,rgba(244,63,94,0.22),rgba(127,29,29,0.42))] px-6 py-5 text-left transition hover:border-rose-300/50 hover:bg-[linear-gradient(135deg,rgba(244,63,94,0.28),rgba(127,29,29,0.5))]"
+  >
+    <div className="text-[1.2rem] font-bold tracking-wide text-white/80">LOWER</div>
+    <div className="mt-2 text-[1.1rem] text-white/65">Payout: ${lowerPayout.toFixed(2)}</div>
+    <div className="mt-1 text-[1.1rem] font-semibold text-white/75">Profit: {lowerProfit >= 0 ? "+" : ""}${lowerProfit.toFixed(2)}</div>
+  </button>
+</div>
+
+<button
+  type="button"
+  onClick={() => {
+  onPlaceHigherLowerTrade({
+    direction: "Higher",
+    durationTicks: 5,
+    barrier: higherDisplay,
+    customStake: stake,
+  });
+
+  onPlaceHigherLowerTrade({
+    direction: "Lower",
+    durationTicks: 5,
+    barrier: lowerDisplay,
+    customStake: lowerStake,
+  });
+}}
+  className="mt-4 w-full rounded-[22px] border border-amber-400/30 bg-[linear-gradient(135deg,rgba(251,146,60,0.22),rgba(194,65,12,0.42))] px-6 py-6 text-center transition hover:border-amber-300/50 hover:bg-[linear-gradient(135deg,rgba(251,146,60,0.28),rgba(194,65,12,0.5))]"
+>
+  <div className="text-[1.2rem] font-bold tracking-wide text-white/80">HIGHER & LOWER</div>
+  <div className="mt-3 text-[1.15rem] text-white/60">
+    Total Stake: ${combinedStake.toFixed(2)}
+    <span className="mx-4 text-white/30">•</span>
+    Combined Payout: ${combinedPayout.toFixed(2)}
+  </div>
+</button>
+
+<div className="mt-6 rounded-[24px] border border-white/10 bg-slate-950/35 p-6">
+  <div className="flex items-start justify-between gap-4">
+    <div>
+      <div className="text-[1.35rem] font-semibold text-white/85">Auto Trading</div>
+    </div>
+
+    <button
+      type="button"
+      onClick={() => setAutoTradingEnabled((v) => !v)}
+      className="inline-flex items-center"
+    >
+      <span className={`relative h-9 w-[74px] rounded-full transition ${autoTradingEnabled ? "bg-cyan-500/35" : "bg-slate-700/80"}`}>
+        <span className={`absolute top-1 h-7 w-7 rounded-full transition ${autoTradingEnabled ? "left-[38px] bg-cyan-300" : "left-1 bg-white/70"}`} />
+      </span>
+    </button>
+  </div>
+
+  <div className="mt-5 flex flex-wrap items-center gap-2">
+    <button
+      type="button"
+      className="rounded-xl border border-cyan-400/35 bg-sky-500/20 px-5 py-2.5 text-[1.05rem] font-medium text-cyan-200 transition"
+    >
+      H&L (2)
+    </button>
+
+    <span className="ml-2 text-[1.05rem] text-white/45">Min:</span>
+
+    {[55, 60, 65, 70, 75].map((pct) => (
+      <button
+        key={pct}
+        type="button"
+        onClick={() => setAutoTradeMinConfidence(pct)}
+        className={`rounded-xl border px-4 py-2.5 text-[1.05rem] font-medium transition ${
+          autoTradeMinConfidence === pct
+            ? "border-cyan-400/35 bg-sky-500/20 text-cyan-200"
+            : "border-white/10 bg-slate-800/55 text-white/40"
+        }`}
+      >
+        {pct}%
+      </button>
+    ))}
+  </div>
+
+  <div className="mt-5 space-y-3">
+  <p className="max-w-4xl text-[1.1rem] leading-9 text-white/45">
+    When enabled, Auto Trading places 1 Higher and 1 Lower trade together on 5 ticks whenever prediction confidence reaches the selected threshold, then waits 30 seconds before the next round.
+  </p>
+
+  <div className="text-[1rem] text-white/55">
+    Status:{" "}
+    <span className={autoTradeReady ? "text-emerald-300" : "text-amber-300"}>
+      {autoTradeReady
+        ? `Ready to place H&L at ${autoTradeMinConfidence}%+ confidence`
+        : `Waiting for ${autoTradeMinConfidence}% confidence or cooldown`}
+    </span>
+  </div>
+</div>
+</div>
+      <div className="mt-6">
+        <StrategyTradeHistoryTab
+          title="M-Spider Trade History"
+          trades={tradeHistory}
+          currency={currency}
+          onClearHistory={onClearHistory}
+        />
+      </div>
+    </div>
+  );
+}
 
 function StrategyRow({
   title,
@@ -2484,83 +3761,273 @@ function StrategyTradeHistoryTab({
   currency: string;
   onClearHistory: () => void;
 }) {
+  const [filter, setFilter] = useState<"all" | "wins" | "losses">("all");
+
+  const normalizedTrades = [...trades].sort((a, b) => b.createdAt - a.createdAt);
+  const wins = normalizedTrades.filter((t) => t.result === "Win");
+  const losses = normalizedTrades.filter((t) => t.result === "Loss");
+
+  const filteredTrades =
+    filter === "wins"
+      ? wins
+      : filter === "losses"
+      ? losses
+      : normalizedTrades;
+
+  const totalProfit = normalizedTrades.reduce((sum, t) => {
+    return sum + (typeof t.profit === "number" ? t.profit : 0);
+  }, 0);
+
+  const settledTrades = normalizedTrades.filter(
+    (t) => t.result === "Win" || t.result === "Loss"
+  );
+  const winRate = settledTrades.length ? (wins.length / settledTrades.length) * 100 : 0;
+
+  const getBadgeTone = (trade: Trade) => {
+    if (trade.result === "Win") {
+      return {
+        card: "border-emerald-400/25 bg-[radial-gradient(circle_at_top,rgba(16,185,129,0.12),rgba(15,23,42,0.55)_55%,rgba(15,23,42,0.85))]",
+        pill: "border-emerald-400/30 bg-emerald-500/12 text-emerald-300",
+        pnl: "text-emerald-300",
+        status: "text-emerald-300",
+        iconWrap: "bg-emerald-500/12 text-emerald-300",
+      };
+    }
+
+    if (trade.result === "Loss") {
+      return {
+        card: "border-rose-400/20 bg-[radial-gradient(circle_at_top,rgba(244,63,94,0.10),rgba(15,23,42,0.55)_55%,rgba(15,23,42,0.85))]",
+        pill: "border-rose-400/30 bg-rose-500/12 text-rose-300",
+        pnl: "text-rose-300",
+        status: "text-rose-300",
+        iconWrap: "bg-rose-500/12 text-rose-300",
+      };
+    }
+
+    return {
+      card: "border-cyan-400/20 bg-[radial-gradient(circle_at_top,rgba(34,211,238,0.10),rgba(15,23,42,0.55)_55%,rgba(15,23,42,0.85))]",
+      pill: "border-amber-400/30 bg-amber-500/12 text-amber-300",
+      pnl: "text-amber-300",
+      status: "text-amber-300",
+      iconWrap: "bg-cyan-500/12 text-cyan-300",
+    };
+  };
+
+  const formatAmount = (n?: number) => {
+    if (typeof n !== "number" || Number.isNaN(n)) return `0.00 ${currency}`;
+    return `${n.toFixed(2)} ${currency}`;
+  };
+
+  const getDerivedPayout = (trade: Trade) => {
+    if (typeof (trade as Trade & { payout?: number }).payout === "number") {
+      return (trade as Trade & { payout?: number }).payout as number;
+    }
+    if (typeof trade.profit === "number") {
+      return trade.stake + trade.profit;
+    }
+    return trade.stake;
+  };
+
   return (
-    <div className="bg-black/30 rounded-xl p-4 border border-white/10 mt-6">
-      <div className="flex items-center justify-between mb-3">
-        <div>
-          <p className="text-sm font-semibold text-white/85">{title}</p>
-          <p className="text-[11px] text-white/50 mt-1">Recent trades for this strategy</p>
+    <div className="mt-6 rounded-[30px] border border-cyan-500/25 bg-[radial-gradient(circle_at_top,rgba(34,211,238,0.10),rgba(15,23,42,0.75)_45%,rgba(15,23,42,0.95))] p-6 shadow-[0_0_0_1px_rgba(34,211,238,0.08)]">
+      <div className="flex items-start justify-between gap-4">
+        <div className="flex items-center gap-4">
+          <div className="flex h-14 w-14 items-center justify-center rounded-2xl border border-cyan-400/35 bg-cyan-500/12 text-2xl text-cyan-300">
+            🏆
+          </div>
+          <div>
+            <h3 className="text-[2rem] font-bold tracking-tight text-cyan-300">Trade History</h3>
+            <p className="mt-1 text-sm text-white/45">{title}</p>
+          </div>
         </div>
+
         <button
+          type="button"
           onClick={onClearHistory}
-          className="text-xs px-3 py-1 rounded-md border border-white/10 bg-black/20 text-white/70 hover:text-white"
+          className="flex h-14 w-14 items-center justify-center rounded-2xl border border-rose-400/30 bg-rose-500/10 text-2xl text-rose-300 transition hover:bg-rose-500/15"
+          aria-label="Clear history"
         >
-          Clear History
+          🗑️
         </button>
       </div>
 
-      <div className="space-y-2 max-h-[320px] overflow-y-auto pr-1">
-        {trades.length === 0 ? (
-          <p className="text-[11px] text-white/55">No trades yet.</p>
-        ) : (
-          trades.slice(0, 20).map((t) => (
-            <div
-              key={t.id}
-              className="bg-black/20 border border-white/10 rounded-lg px-3 py-3"
-            >
-              <div className="flex items-center justify-between gap-3 text-[11px]">
-                <span className="text-white/55">{new Date(t.createdAt).toLocaleTimeString()}</span>
-                <span className="text-white/80 font-semibold">{t.symbol}</span>
-                <span className="text-white/70">{t.type}</span>
-              </div>
+      <div className="mt-8 grid grid-cols-1 gap-5 md:grid-cols-2">
+        <div className="rounded-[24px] border border-white/10 bg-[radial-gradient(circle_at_center,rgba(16,185,129,0.10),rgba(15,23,42,0.90)_65%)] p-6">
+          <div className="text-[1.15rem] text-white/80">⚡ Net Profit/Loss</div>
+          <div
+            className={`mt-5 text-[3rem] font-bold leading-none ${
+              totalProfit >= 0 ? "text-emerald-300" : "text-rose-300"
+            }`}
+          >
+            {totalProfit >= 0 ? "+" : ""}
+            {totalProfit.toFixed(2)} {currency}
+          </div>
+        </div>
 
-              <div className="mt-2 grid grid-cols-2 md:grid-cols-4 gap-2 text-[11px]">
-                <div className="rounded-md bg-black/20 border border-white/10 px-2 py-2">
-                  <p className="text-white/45">Stake</p>
-                  <p className="text-white/80 font-medium">
-                    {Number(t.stake).toFixed(2)} {currency}
-                  </p>
-                </div>
-
-                <div className="rounded-md bg-black/20 border border-white/10 px-2 py-2">
-                  <p className="text-white/45">Duration</p>
-                  <p className="text-white/80 font-medium">{t.durationTicks}t</p>
-                </div>
-
-                <div className="rounded-md bg-black/20 border border-white/10 px-2 py-2">
-                  <p className="text-white/45">Result</p>
-                  <p
-                    className={`font-semibold ${
-                      t.result === "Win"
-                        ? "text-emerald-300"
-                        : t.result === "Loss"
-                        ? "text-red-300"
-                        : "text-yellow-200"
-                    }`}
-                  >
-                    {t.result}
-                  </p>
-                </div>
-
-                <div className="rounded-md bg-black/20 border border-white/10 px-2 py-2">
-                  <p className="text-white/45">P/L</p>
-                  <p
-                    className={`font-semibold ${
-                      typeof t.profit === "number"
-                        ? t.profit >= 0
-                          ? "text-emerald-300"
-                          : "text-red-300"
-                        : "text-white/70"
-                    }`}
-                  >
-                    {typeof t.profit === "number"
-                      ? `${t.profit >= 0 ? "+" : ""}${t.profit.toFixed(2)} ${currency}`
-                      : "—"}
-                  </p>
-                </div>
-              </div>
+        <div className="rounded-[24px] border border-white/10 bg-[radial-gradient(circle_at_center,rgba(59,130,246,0.12),rgba(15,23,42,0.90)_65%)] p-6">
+          <div className="text-[1.15rem] text-white/80">◎ Win Rate</div>
+          <div className="mt-5 flex items-end gap-3">
+            <div className="text-[3rem] font-bold leading-none text-sky-300">
+              {winRate.toFixed(1)}%
             </div>
-          ))
+            <div className="pb-1 text-[1.1rem] text-white/70">
+              ({wins.length}/{settledTrades.length || 0})
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div className="mt-8 grid grid-cols-1 gap-4 md:grid-cols-3">
+        <button
+          type="button"
+          onClick={() => setFilter("all")}
+          className={`rounded-[20px] border px-6 py-5 text-left text-[1.15rem] font-semibold transition ${
+            filter === "all"
+              ? "border-sky-400/45 bg-sky-500/18 text-cyan-200 shadow-[0_0_0_1px_rgba(56,189,248,0.25)]"
+              : "border-white/10 bg-white/5 text-white/75"
+          }`}
+        >
+          🏆 All Trades ({normalizedTrades.length})
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setFilter("wins")}
+          className={`rounded-[20px] border px-6 py-5 text-left text-[1.15rem] font-semibold transition ${
+            filter === "wins"
+              ? "border-emerald-400/45 bg-emerald-500/14 text-emerald-200 shadow-[0_0_0_1px_rgba(52,211,153,0.18)]"
+              : "border-white/10 bg-white/5 text-white/75"
+          }`}
+        >
+          ✓ Wins ({wins.length})
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setFilter("losses")}
+          className={`rounded-[20px] border px-6 py-5 text-left text-[1.15rem] font-semibold transition ${
+            filter === "losses"
+              ? "border-rose-400/45 bg-rose-500/14 text-rose-200 shadow-[0_0_0_1px_rgba(251,113,133,0.18)]"
+              : "border-white/10 bg-white/5 text-white/75"
+          }`}
+        >
+          ⊗ Losses ({losses.length})
+        </button>
+      </div>
+
+      <div className="mt-8 space-y-5">
+        {filteredTrades.length === 0 ? (
+          <div className="rounded-[24px] border border-white/10 bg-slate-900/35 px-6 py-12 text-center text-white/50">
+            No trades found for this filter.
+          </div>
+        ) : (
+          filteredTrades.slice(0, 20).map((trade) => {
+            const tones = getBadgeTone(trade);
+            const payout = getDerivedPayout(trade);
+            const entryLabel =
+              trade.type === "Matches" ||
+              trade.type === "Differs" ||
+              trade.type === "Over" ||
+              trade.type === "Under"
+                ? `${trade.type.toUpperCase()} ${trade.digit}`
+                : trade.type.toUpperCase();
+
+            return (
+              <div
+                key={trade.id}
+                className={`rounded-[26px] border p-6 shadow-[0_0_0_1px_rgba(255,255,255,0.03)] ${tones.card}`}
+              >
+                <div className="flex flex-col gap-5 lg:flex-row lg:items-start lg:justify-between">
+                  <div className="min-w-0">
+                    <div className="flex flex-wrap items-center gap-3">
+                      <div
+                        className={`flex h-12 w-12 items-center justify-center rounded-2xl ${tones.iconWrap}`}
+                      >
+                        ↗
+                      </div>
+                      <div className="text-[2rem] font-bold leading-none text-white">
+                        {trade.symbol}
+                      </div>
+                      <span
+                        className={`rounded-full border px-4 py-1.5 text-sm font-bold uppercase tracking-wide ${tones.pill}`}
+                      >
+                        {trade.result === "Pending" ? "Pending" : trade.result}
+                      </span>
+                    </div>
+
+                    <div className="mt-4 flex flex-wrap items-center gap-3 text-[1.1rem]">
+                      <span className="font-semibold text-cyan-300">{trade.source ?? title}</span>
+                      <span className="rounded-full border border-sky-400/30 bg-sky-500/12 px-4 py-1 text-sky-300">
+                        {trade.durationTicks} ticks
+                      </span>
+                      <span className="rounded-lg border border-violet-400/30 bg-violet-500/12 px-4 py-1 text-violet-300">
+                        {entryLabel}
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="text-left lg:text-right">
+                    <div className={`text-[2.2rem] font-bold ${tones.pnl}`}>
+                      {typeof trade.profit === "number"
+                        ? `${trade.profit >= 0 ? "+" : ""}${trade.profit.toFixed(2)} ${currency}`
+                        : "—"}
+                    </div>
+                    <div className="mt-2 text-[1.15rem] text-white/70">
+                      Stake:{" "}
+                      <span className="font-semibold text-white/85">
+                        {formatAmount(trade.stake)}
+                      </span>
+                    </div>
+                    <div className="mt-1 text-[1.15rem] text-white/45">
+                      Payout:{" "}
+                      <span className="font-semibold text-white/65">
+                        {formatAmount(payout)}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="mt-5 border-t border-white/10 pt-5">
+                  <div className="grid grid-cols-1 gap-y-4 text-[1.1rem] md:grid-cols-[160px_1fr] md:gap-x-6">
+                    <div className="text-white/75">Time</div>
+                    <div className="text-white/85 md:text-right">
+                      {new Date(trade.createdAt).toLocaleString()}
+                    </div>
+
+                    <div className="text-white/75">Entry</div>
+                    <div className="md:text-right">
+                      <span className="inline-flex rounded-lg border border-violet-400/30 bg-violet-500/12 px-4 py-2 font-semibold tracking-wide text-violet-300">
+                        {entryLabel}
+                      </span>
+                    </div>
+
+                    <div className="text-white/75">Exit Digit</div>
+                    <div className="md:text-right">
+                      <span className="inline-flex min-w-[48px] items-center justify-center rounded-lg border border-emerald-400/25 bg-emerald-500/12 px-4 py-2 text-[1.8rem] font-bold text-emerald-300">
+                        {typeof trade.settlementDigit === "number" ? trade.settlementDigit : "—"}
+                      </span>
+                    </div>
+
+                    <div className="text-white/75">Payout</div>
+                    <div className="font-semibold text-white/85 md:text-right">
+                      {formatAmount(payout)}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="mt-5 border-t border-white/10 pt-5 flex items-center justify-between gap-4">
+                  <div className="text-white/75">Status</div>
+                  <div className={`text-[1.15rem] font-semibold ${tones.status}`}>
+                    {trade.result === "Win"
+                      ? "◌ Completed - Won"
+                      : trade.result === "Loss"
+                      ? "◌ Completed - Lost"
+                      : "◌ Pending"}
+                  </div>
+                </div>
+              </div>
+            );
+          })
         )}
       </div>
     </div>
@@ -2658,6 +4125,7 @@ setRfAllowEquals: React.Dispatch<React.SetStateAction<boolean>>;
     const arrow = move > 0 ? "↑" : move < 0 ? "↓" : "→";
     return { value: q, arrow, tone };
   });
+  
 
   return (
     <div className="rounded-2xl border border-white/10 overflow-hidden shadow-[0_0_0_1px_rgba(255,255,255,0.06)]">
@@ -2850,7 +4318,7 @@ setRfAllowEquals: React.Dispatch<React.SetStateAction<boolean>>;
 
         <StrategyTradeHistoryTab
           title="Rise/Fall Trade History"
-          trades={riseFallTrades}
+          trades={tradeHistory}
           currency={currency}
           onClearHistory={onClearHistory}
         />
@@ -3580,7 +5048,14 @@ const canShow = (key: keyof UIFlags) => isAdmin || uiFlags[key] !== false;
 </div>
 
       {/* Trade History */}
-      <TradeHistoryMetroLike tradeHistory={tradeHistory} currency={currency} onClear={onClearHistory} />
+     <div className="mt-6">
+  <StrategyTradeHistoryTab
+    title="Trade History"
+    trades={tradeHistory}
+    currency={currency}
+    onClearHistory={onClearHistory}
+  />
+</div>
     </div>
   );
 }
@@ -4593,10 +6068,15 @@ function SpiderXAnalyzer({
         )}
       </div>
 
-      {/* ================= Trade History (Separate Panel) ================= */}
-      <div className="mt-6">
-        <TradeHistoryMetroLike tradeHistory={tradeHistory} currency={currency} onClear={onClearHistory} />
-      </div>
+{/* ================= Trade History (Separate Panel) ================= */}
+<div className="mt-6">
+  <StrategyTradeHistoryTab
+    title="Trade History"
+    trades={tradeHistory}
+    currency={currency}
+    onClearHistory={onClearHistory}
+  />
+</div>
     </div>
   );
 }
