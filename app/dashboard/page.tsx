@@ -125,6 +125,23 @@ type Trade = {
   batchTotal?: number; // 3 or 5
 };
 
+type BarrierOptimizerWindow = 3 | 5 | 10 | 15;
+
+type BarrierOptimizerRow = {
+  pair: Pair;
+  label: string;
+  ticks: number;
+  higherWinPct: number;
+  lowerWinPct: number;
+  avgMoveUp: number;
+  avgMoveDown: number;
+  higherBarrier: number;
+  lowerBarrier: number;
+  difference: number;
+  best: "HIGHER" | "LOWER";
+  score: number;
+};
+
 const CONTRACT_TYPE_MAP: Record<TradeType, string> = {
   Matches: "DIGITMATCH",
   Differs: "DIGITDIFF",
@@ -168,6 +185,128 @@ function parseMSpiderDuration(value: string): { duration: number; duration_unit:
     return { duration: Number.parseInt(value, 10), duration_unit: "h" };
   }
   return { duration: 5, duration_unit: "t" };
+}
+const BARRIER_OPTIMIZER_PAIRS = [
+  "R_10",
+  "R_25",
+  "R_50",
+  "R_75",
+  "R_100",
+  "1HZ10V",
+  "1HZ15V",
+  "1HZ25V",
+  "1HZ30V",
+  "1HZ50V",
+  "1HZ75V",
+  "1HZ90V",
+  "1HZ100V",
+] as const satisfies readonly Pair[];
+
+const BARRIER_WINDOW_TICK_COUNT: Record<BarrierOptimizerWindow, number> = {
+  3: 3,
+  5: 5,
+  10: 10,
+  15: 15,
+};
+
+const getPairLabel = (pair: Pair) => {
+  for (const group of Object.values(INDEX_GROUPS)) {
+    const found = group.find((item) => item.code === pair);
+    if (found) return found.label;
+  }
+  return pair;
+};
+
+function formatOptimizerBarrier(value: number) {
+  return `${value >= 0 ? "+" : ""}${value.toFixed(2)}`;
+}
+
+function clampPercent(value: number) {
+  return Math.max(0, Math.min(100, value));
+}
+
+function buildBarrierOptimizerRows(params: {
+  pairQuotesRef: React.MutableRefObject<Record<Pair, number[]>>;
+  windowTicks: BarrierOptimizerWindow;
+}): BarrierOptimizerRow[] {
+  const { pairQuotesRef, windowTicks } = params;
+  const lookahead = BARRIER_WINDOW_TICK_COUNT[windowTicks];
+
+  const rows = BARRIER_OPTIMIZER_PAIRS.map((pair) => {
+    const quotes = pairQuotesRef.current[pair] ?? [];
+    if (quotes.length <= lookahead + 2) {
+      return null;
+    }
+
+    let higherWins = 0;
+    let lowerWins = 0;
+    let totalUp = 0;
+    let totalDown = 0;
+    let moveSamples = 0;
+
+    for (let i = 0; i < quotes.length - lookahead; i++) {
+      const entry = quotes[i];
+      const futureSlice = quotes.slice(i + 1, i + 1 + lookahead);
+      if (!futureSlice.length) continue;
+
+      const maxFuture = Math.max(...futureSlice);
+      const minFuture = Math.min(...futureSlice);
+
+      const upMove = maxFuture - entry;
+      const downMove = entry - minFuture;
+
+      if (upMove > 0) totalUp += upMove;
+      if (downMove > 0) totalDown += downMove;
+
+      if (upMove > downMove) higherWins++;
+      if (downMove > upMove) lowerWins++;
+      if (upMove > 0 || downMove > 0) moveSamples++;
+    }
+
+    if (!moveSamples) return null;
+
+    const higherWinPct = clampPercent((higherWins / moveSamples) * 100);
+    const lowerWinPct = clampPercent((lowerWins / moveSamples) * 100);
+    const avgMoveUp = totalUp / moveSamples;
+    const avgMoveDown = totalDown / moveSamples;
+
+    // derive recommended barriers from average movement
+// H must always be positive
+const higherBarrier = Math.abs(avgMoveUp * 0.25);
+
+// L must always be negative
+const lowerBarrier = -Math.abs(avgMoveDown * 0.25);
+
+// difference must reflect real directional edge
+const difference = avgMoveUp - avgMoveDown;
+
+const best: "HIGHER" | "LOWER" = difference >= 0 ? "HIGHER" : "LOWER";
+
+    const score = Math.round(
+      clampPercent(
+        Math.abs(difference) * 12 + Math.max(higherWinPct, lowerWinPct) * 0.9
+      )
+    );
+
+    return {
+      pair,
+      label: getPairLabel(pair),
+      ticks: quotes.length,
+      higherWinPct,
+      lowerWinPct,
+      avgMoveUp,
+      avgMoveDown,
+      higherBarrier,
+      lowerBarrier,
+      difference,
+      best,
+      score,
+    };
+  }).filter(Boolean) as BarrierOptimizerRow[];
+
+  return rows
+    .sort((a, b) => Math.abs(b.difference) - Math.abs(a.difference))
+    .slice(0, 4); // only top 4
 }
 function MarketIndicator({
   activeStrategy,
@@ -809,6 +948,9 @@ useEffect(() => {
   const selectedPairRef = useRef<Pair>(PAIRS[0]);
   const lastEdshellAtRef = useRef(0);
   const [uiFlags, setUiFlags] = useState<UIFlags>(DEFAULT_UI_FLAGS);
+  const [barrierOptimizerOpen, setBarrierOptimizerOpen] = useState(false);
+const [barrierOptimizerLive, setBarrierOptimizerLive] = useState(false);
+const [barrierOptimizerWindow, setBarrierOptimizerWindow] = useState<BarrierOptimizerWindow>(5);
 
   // ✅ force-remount MetroX panel (resets its local analysis state)
   const [metroXResetKey, setMetroXResetKey] = useState(0);
@@ -917,6 +1059,13 @@ const spiderRandomLoopRef = useRef(false);
 
   // collapsible analysis box
   const [analysisOpen, setAnalysisOpen] = useState(false);
+  const barrierOptimizerRows = useMemo(() => {
+  if (!barrierOptimizerLive) return [];
+  return buildBarrierOptimizerRows({
+    pairQuotesRef,
+    windowTicks: barrierOptimizerWindow,
+  });
+}, [barrierOptimizerLive, barrierOptimizerWindow, ticks]);
 
   // per-pair meta (for display + decision)
   const emptyMeta = Object.fromEntries(
@@ -1006,6 +1155,14 @@ const runBuyWorker = async () => {
   }
 };
 
+useEffect(() => {
+  if (activeStrategy !== "mspider") return;
+  if (!barrierOptimizerLive) return;
+
+  BARRIER_OPTIMIZER_PAIRS.forEach((pair) => {
+    safeSend({ ticks: pair, subscribe: 1 });
+  });
+}, [activeStrategy, barrierOptimizerLive]);
   // ✅ robust last digit (handles 0 correctly)
   const getLastDigit = (quote: number, pip: number) => {
     const fixed = quote.toFixed(pip);
@@ -1318,6 +1475,7 @@ if (data.msg_type === "proposal") {
   // stop fast auto if running
   fastAutoCancelRef.current = true;
   setFastAutoRunning(false);
+  setBarrierOptimizerLive(false);
 
   wsRef.current?.close();
   wsRef.current = null;
@@ -1328,6 +1486,7 @@ if (data.msg_type === "proposal") {
 
   const logout = () => {
     disconnect();
+    setBarrierOptimizerLive(false);
     localStorage.clear();
     router.replace("/");
     localStorage.removeItem("deriv_token");
@@ -1357,15 +1516,16 @@ if (data.msg_type === "proposal") {
 };
 const placeHigherLowerTrade = ({
   direction,
-  durationTicks,
+  durationValue,
   barrier,
   customStake,
 }: {
   direction: "Higher" | "Lower";
-  durationTicks: number;
+  durationValue: string;
   barrier: string;
   customStake?: number;
 }) => {
+
   const tradeStake = customStake ?? stake;
 
   if (!tradeStake || tradeStake <= 0) return alert("Enter a stake amount");
@@ -1377,17 +1537,19 @@ const placeHigherLowerTrade = ({
 
   const req_id = newReqId();
 
-  const trade: Trade = {
-    id: req_id,
-    symbol: selectedPair,
-    digit: 0,
-    type: direction,
-    stake: tradeStake,
-    durationTicks,
-    result: "Pending",
-    createdAt: Date.now(),
-    source: "M-Spider",
-  };
+  const parsedDuration = parseMSpiderDuration(String(durationValue));
+
+const trade: Trade = {
+  id: req_id,
+  symbol: selectedPair,
+  digit: 0,
+  type: direction,
+  stake: tradeStake,
+  durationTicks: parsedDuration.duration_unit === "t" ? parsedDuration.duration : 0,
+  result: "Pending",
+  createdAt: Date.now(),
+  source: "M-Spider",
+};
 
   setTradeHistory((prev) => [trade, ...prev]);
 
@@ -1398,7 +1560,7 @@ const placeHigherLowerTrade = ({
     stake: tradeStake,
   };
 
-  const { duration, duration_unit } = parseMSpiderDuration(String(durationTicks));
+  const { duration, duration_unit } = parseMSpiderDuration(String(durationValue));
 
 safeSend({
   proposal: 1,
@@ -2590,24 +2752,28 @@ const toggleSpiderRandomAuto = async () => {
 
 {activeStrategy === "mspider" && isStrategyEnabledForViewer("mspider") && (
   <div className="bg-[#13233d] p-6 flex flex-col min-h-[520px]">
-   <MSpiderPanel
-  header="M-Spider Analysis"
-  selectedPair={selectedPair}
-  setSelectedPair={(p: Pair) => {
-    resetPairNow(p);
-    setSelectedPair(p);
-  }}
-  stake={stake}
-  setStake={setStake}
-  currency={currency}
-onPlaceHigherLowerTrade={placeHigherLowerTrade}
-requestHigherLowerPreview={requestHigherLowerPreview}
-tradeHistory={tradeHistory}
-  onClearHistory={() => setTradeHistory([])}
-  pairQuotesRef={pairQuotesRef}
-/>
+    <MSpiderPanel
+      header="M-Spider"
+      selectedPair={selectedPair}
+      setSelectedPair={setSelectedPair}
+      stake={stake}
+      setStake={setStake}
+      currency={currency}
+      onPlaceHigherLowerTrade={placeHigherLowerTrade}
+      requestHigherLowerPreview={requestHigherLowerPreview}
+      tradeHistory={tradeHistory}
+      onClearHistory={() => setTradeHistory([])}
+      pairQuotesRef={pairQuotesRef}
+      barrierOptimizerLive={barrierOptimizerLive}
+      setBarrierOptimizerLive={setBarrierOptimizerLive}
+      barrierOptimizerWindow={barrierOptimizerWindow}
+      setBarrierOptimizerWindow={setBarrierOptimizerWindow}
+      barrierOptimizerRows={barrierOptimizerRows}
+      setBarrierOptimizerOpen={setBarrierOptimizerOpen}
+    />
   </div>
 )}
+
 
             {/* ✅ if user selects a disabled strategy, show the default empty state */}
             {!activeStrategy && (
@@ -2639,12 +2805,24 @@ function MSpiderPanel({
   stake,
   setStake,
   currency,
-onPlaceHigherLowerTrade,
-requestHigherLowerPreview,
-tradeHistory,
+  onPlaceHigherLowerTrade,
+  requestHigherLowerPreview,
+  tradeHistory,
   onClearHistory,
   pairQuotesRef,
+  barrierOptimizerLive,
+  setBarrierOptimizerLive,
+  barrierOptimizerWindow,
+  setBarrierOptimizerWindow,
+  barrierOptimizerRows,
+  setBarrierOptimizerOpen,
 }: {
+  barrierOptimizerLive: boolean;
+  setBarrierOptimizerLive: React.Dispatch<React.SetStateAction<boolean>>;
+  barrierOptimizerWindow: BarrierOptimizerWindow;
+  setBarrierOptimizerWindow: React.Dispatch<React.SetStateAction<BarrierOptimizerWindow>>;
+  barrierOptimizerRows: BarrierOptimizerRow[];
+  setBarrierOptimizerOpen: React.Dispatch<React.SetStateAction<boolean>>;
   header: string;
   selectedPair: Pair;
   setSelectedPair: (p: Pair) => void;
@@ -2653,7 +2831,7 @@ tradeHistory,
   currency: string;
   onPlaceHigherLowerTrade: (args: {
   direction: "Higher" | "Lower";
-  durationTicks: number;
+  durationValue: string;
   barrier: string;
   customStake?: number;
 }) => void;
@@ -2681,10 +2859,7 @@ requestHigherLowerPreview: (args: {
   const [lowerBarrier, setLowerBarrier] = useState<string>("+0.12");
 
   const durationOptions = [
-    { value: "1", label: "1 Tick" },
-    { value: "2", label: "2 Ticks" },
-    { value: "3", label: "3 Ticks" },
-    { value: "4", label: "4 Ticks" },
+    
     { value: "5", label: "5 Ticks" },
     { value: "15s", label: "15 Seconds" },
     { value: "30s", label: "30 Seconds" },
@@ -2921,24 +3096,25 @@ useEffect(() => {
   autoTradeLastAtRef.current = Date.now();
 
   onPlaceHigherLowerTrade({
-    direction: "Higher",
-    durationTicks: 5,
-    barrier: higherDisplay,
-    customStake: stake,
-  });
+  direction: "Higher",
+  durationValue: duration,
+  barrier: higherDisplay,
+  customStake: stake,
+});
 
-  onPlaceHigherLowerTrade({
-    direction: "Lower",
-    durationTicks: 5,
-    barrier: lowerDisplay,
-    customStake: lowerStake,
-  });
+onPlaceHigherLowerTrade({
+  direction: "Lower",
+  durationValue: duration,
+  barrier: lowerDisplay,
+  customStake: lowerStake,
+});
 }, [
   autoTradingEnabled,
   autoTradeReady,
   autoTradeMinConfidence,
   higherDisplay,
   lowerDisplay,
+  duration,
   stake,
   lowerStake,
   onPlaceHigherLowerTrade,
@@ -3242,6 +3418,228 @@ useEffect(() => {
           </div>
         </div>
       </div>
+      
+      <div className="mt-8 rounded-[28px] border border-cyan-500/20 bg-[linear-gradient(135deg,rgba(10,23,53,0.96),rgba(4,16,42,0.98)_55%,rgba(2,13,36,0.99))] p-5 shadow-[0_0_0_1px_rgba(34,211,238,0.08)]">
+  <div className="flex items-start justify-between gap-4">
+    <div className="flex items-start gap-3">
+      <div className="flex h-12 w-12 items-center justify-center rounded-2xl border border-amber-400/25 bg-amber-500/10 text-amber-300 text-2xl">
+        ⌖
+      </div>
+      <div>
+        <div className="text-[1.3rem] font-bold leading-none text-white">
+          Barrier Optimizer
+        </div>
+        <div className="mt-1 text-sm text-white/55">
+          Find the best barrier settings for each pair
+        </div>
+      </div>
+    </div>
+
+    <div className="flex items-center gap-2">
+      {barrierOptimizerLive && (
+        <span className="rounded-full border border-emerald-400/20 bg-emerald-500/12 px-3 py-1 text-xs font-semibold text-emerald-300">
+          ● LIVE
+        </span>
+      )}
+      <span className="rounded-full border border-amber-400/20 bg-amber-500/12 px-3 py-1 text-xs font-semibold text-amber-300">
+        {barrierOptimizerRows.length} pairs
+      </span>
+    </div>
+  </div>
+
+  <div className="mt-5 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+    <div className="flex flex-wrap items-center gap-2">
+      <span className="text-white/70 text-sm">Window:</span>
+      {[3, 5, 10, 15].map((n) => (
+        <button
+          key={n}
+          type="button"
+          onClick={() => setBarrierOptimizerWindow(n as BarrierOptimizerWindow)}
+          className={`rounded-xl border px-4 py-2 text-sm font-medium transition ${
+            barrierOptimizerWindow === n
+              ? "border-amber-400/35 bg-amber-500/15 text-amber-300"
+              : "border-white/10 bg-white/5 text-white/40"
+          }`}
+        >
+          {n} ticks
+        </button>
+      ))}
+    </div>
+
+    <button
+      type="button"
+      onClick={() => setBarrierOptimizerLive((v) => !v)}
+      className={`rounded-xl px-5 py-2.5 text-sm font-semibold text-white transition ${
+        barrierOptimizerLive
+          ? "bg-rose-600 hover:bg-rose-500"
+          : "bg-orange-500 hover:bg-orange-400"
+      }`}
+    >
+      {barrierOptimizerLive ? "Stop" : "Go Live"}
+    </button>
+  </div>
+
+  {!barrierOptimizerLive ? (
+    <div className="mt-6 flex min-h-[230px] flex-col items-center justify-center rounded-[24px] border border-white/10 bg-white/5 px-6 text-center">
+      <div className="flex h-16 w-16 items-center justify-center rounded-[20px] border border-amber-400/20 bg-amber-500/10 text-2xl text-amber-300">
+        ⌖
+      </div>
+      <div className="mt-4 text-xl font-semibold text-white/85">
+        No scan results yet
+      </div>
+      <div className="mt-2 max-w-xl text-sm leading-7 text-white/45">
+        Click &quot;Go Live&quot; to connect to all volatility pairs and get continuously updated barrier recommendations.
+      </div>
+    </div>
+  ) : (
+    <div className="mt-6 rounded-[24px] border border-cyan-500/20 bg-[#07152c]/85 p-4">
+      <div className="flex flex-col gap-2 lg:flex-row lg:items-center lg:justify-between">
+        <div className="flex items-center gap-2 text-sm font-semibold text-white/85">
+          <span className="text-amber-300">◔</span>
+          <span>Top 4 pairs by longest movement ({barrierOptimizerWindow}-tick window)</span>
+        </div>
+
+        <div className="flex items-center gap-2 text-xs">
+          <span className="rounded-full border border-emerald-400/20 bg-emerald-500/12 px-3 py-1 font-semibold text-emerald-300">
+            ● LIVE
+          </span>
+          <span className="text-white/35">{quotes.length} ticks</span>
+        </div>
+      </div>
+
+      <div className="mt-4 space-y-4">
+        {barrierOptimizerRows.length === 0 ? (
+          <div className="rounded-[20px] border border-white/10 bg-white/5 p-5 text-sm text-white/55">
+            Waiting for enough live tick history to rank all pairs.
+          </div>
+        ) : (
+          barrierOptimizerRows.map((row, index) => {
+            const scoreWidth = `${Math.max(8, Math.min(100, row.score))}%`;
+            const rowTicks = pairQuotesRef.current[row.pair]?.length ?? row.ticks;
+            const differenceText = `${row.difference >= 0 ? "+" : ""}${row.difference.toFixed(2)}`;
+
+            return (
+              <div
+                key={row.pair}
+                className={`rounded-[22px] border p-4 ${
+                  index === 0
+                    ? "border-emerald-400/20 bg-[linear-gradient(90deg,rgba(16,185,129,0.10),rgba(15,23,42,0.20))]"
+                    : "border-cyan-500/20 bg-[linear-gradient(180deg,rgba(8,19,42,0.88),rgba(6,16,35,0.92))]"
+                }`}
+              >
+                <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+                  <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="rounded-lg bg-white/10 px-2 py-1 text-xs font-semibold text-amber-300">
+                        #{index + 1}
+                      </span>
+                      <div className="text-[1.1rem] font-semibold text-white">
+                        {row.label}
+                      </div>
+                      {index === 0 && (
+                        <span className="rounded-full border border-cyan-400/20 bg-cyan-500/10 px-2 py-1 text-[10px] font-semibold text-cyan-300">
+                          ACTIVE
+                        </span>
+                      )}
+                      <span className="text-xs text-white/35">↗ {rowTicks}t</span>
+                    </div>
+
+                    <div className="mt-4 grid grid-cols-2 gap-x-6 gap-y-3 text-sm lg:grid-cols-4">
+                      <div>
+                        <div className="text-white/40">Higher win:</div>
+                        <div className="mt-1 font-semibold text-cyan-300">
+                          {row.higherWinPct.toFixed(1)}%
+                        </div>
+                      </div>
+                      <div>
+                        <div className="text-white/40">Lower win:</div>
+                        <div className="mt-1 font-semibold text-amber-300">
+                          {row.lowerWinPct.toFixed(1)}%
+                        </div>
+                      </div>
+                      <div>
+                        <div className="text-white/40">Avg move up:</div>
+                        <div className="mt-1 font-semibold text-emerald-300">
+                          {row.avgMoveUp.toFixed(2)}
+                        </div>
+                      </div>
+                      <div>
+                        <div className="text-white/40">Avg move dn:</div>
+                        <div className="mt-1 font-semibold text-rose-300">
+                          {row.avgMoveDown.toFixed(2)}
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="mt-4 text-sm text-white/35">
+                      Difference (Up - Down):
+                    </div>
+
+                    <div className="mt-3 flex flex-wrap items-center gap-2">
+                      <div className="rounded-xl bg-emerald-500/10 px-3 py-2 text-sm font-semibold text-emerald-300">
+                        ↗ H: {formatOptimizerBarrier(row.higherBarrier)}
+                      </div>
+                      <div className="rounded-xl bg-rose-500/10 px-3 py-2 text-sm font-semibold text-rose-300">
+                        ↘ L: {formatOptimizerBarrier(row.lowerBarrier)}
+                      </div>
+                      <div className="rounded-xl bg-amber-500/10 px-3 py-2 text-sm font-semibold text-amber-300">
+                        ⚡ Best: {row.best}
+                      </div>
+                    </div>
+
+                    <div className="mt-4">
+                      <div className="text-xs text-white/40">Score</div>
+                      <div className="mt-2 h-2 overflow-hidden rounded-full bg-white/10">
+                        <div
+                          className="h-full rounded-full bg-emerald-400"
+                          style={{ width: scoreWidth }}
+                        />
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="flex shrink-0 items-center gap-4 lg:flex-col lg:items-end">
+                    <div className="text-right">
+                      <div className="text-3xl font-extrabold text-emerald-300">
+                        {row.score}
+                      </div>
+                      <div className="text-[11px] uppercase tracking-[0.2em] text-white/35">
+                        Score
+                      </div>
+                      <div
+                        className={`mt-2 text-sm font-semibold ${
+                          row.difference >= 0 ? "text-emerald-300" : "text-rose-300"
+                        }`}
+                      >
+                        {differenceText}
+                      </div>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() => {
+  setSelectedPair(row.pair);
+  setHigherBarrier(formatOffset(Math.abs(row.higherBarrier)));
+  setLowerBarrier(formatOffset(-Math.abs(row.lowerBarrier)));
+}}
+                      className="rounded-xl bg-orange-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-orange-400"
+                    >
+                      Apply
+                    </button>
+                  </div>
+                </div>
+              </div>
+            );
+          })
+        )}
+      </div>
+
+      <div className="mt-4 rounded-[20px] border border-white/10 bg-white/5 px-4 py-3 text-xs leading-6 text-white/45">
+        Live mode: shows the top 4 pairs with the longest up & down movement from spot price. Barriers are set at 25% of average movement for balanced wins. Updates continuously.
+      </div>
+    </div>
+  )}
+</div>
 
       <div className="mt-8 rounded-[28px] border border-white/10 bg-slate-900/25 p-5 shadow-[0_0_0_1px_rgba(255,255,255,0.03)]">
   <div className="flex items-center justify-between gap-4">
@@ -3588,11 +3986,11 @@ useEffect(() => {
     type="button"
     onClick={() =>
   onPlaceHigherLowerTrade({
-    direction: "Higher",
-    durationTicks: Number.parseInt(duration, 10) || 5,
-    barrier: higherDisplay,
-    customStake: stake,
-  })
+  direction: "Higher",
+  durationValue: duration,
+  barrier: higherDisplay,
+  customStake: stake,
+})
 }
     className="rounded-[22px] border border-emerald-400/30 bg-[linear-gradient(135deg,rgba(16,185,129,0.22),rgba(6,95,70,0.42))] px-6 py-5 text-left transition hover:border-emerald-300/50 hover:bg-[linear-gradient(135deg,rgba(16,185,129,0.28),rgba(6,95,70,0.5))]"
   >
@@ -3605,11 +4003,11 @@ useEffect(() => {
     type="button"
     onClick={() =>
   onPlaceHigherLowerTrade({
-    direction: "Lower",
-    durationTicks: Number.parseInt(duration, 10) || 5,
-    barrier: lowerDisplay,
-    customStake: lowerStake,
-  })
+  direction: "Lower",
+  durationValue: duration,
+  barrier: lowerDisplay,
+  customStake: lowerStake,
+})
 }
     className="rounded-[22px] border border-rose-400/30 bg-[linear-gradient(135deg,rgba(244,63,94,0.22),rgba(127,29,29,0.42))] px-6 py-5 text-left transition hover:border-rose-300/50 hover:bg-[linear-gradient(135deg,rgba(244,63,94,0.28),rgba(127,29,29,0.5))]"
   >
@@ -3623,18 +4021,18 @@ useEffect(() => {
   type="button"
   onClick={() => {
   onPlaceHigherLowerTrade({
-    direction: "Higher",
-    durationTicks: 5,
-    barrier: higherDisplay,
-    customStake: stake,
-  });
+  direction: "Higher",
+  durationValue: duration,
+  barrier: higherDisplay,
+  customStake: stake,
+});
 
-  onPlaceHigherLowerTrade({
-    direction: "Lower",
-    durationTicks: 5,
-    barrier: lowerDisplay,
-    customStake: lowerStake,
-  });
+onPlaceHigherLowerTrade({
+  direction: "Lower",
+  durationValue: duration,
+  barrier: lowerDisplay,
+  customStake: lowerStake,
+});
 }}
   className="mt-4 w-full rounded-[22px] border border-amber-400/30 bg-[linear-gradient(135deg,rgba(251,146,60,0.22),rgba(194,65,12,0.42))] px-6 py-6 text-center transition hover:border-amber-300/50 hover:bg-[linear-gradient(135deg,rgba(251,146,60,0.28),rgba(194,65,12,0.5))]"
 >
@@ -3915,7 +4313,7 @@ function StrategyTradeHistoryTab({
         </button>
       </div>
 
-      <div className="mt-8 space-y-5">
+      <div className="mt-8 max-h-[720px] overflow-y-auto pr-2 space-y-5">
         {filteredTrades.length === 0 ? (
           <div className="rounded-[24px] border border-white/10 bg-slate-900/35 px-6 py-12 text-center text-white/50">
             No trades found for this filter.
@@ -5195,7 +5593,7 @@ function TradeHistoryMetroLike({
       </div>
 
       {/* List */}
-      <div className="mt-4 max-h-80 overflow-y-auto space-y-3 pr-1">
+      <div className="mt-4 max-h-[720px] overflow-y-auto space-y-3 pr-2">
         {filtered.length === 0 ? (
           <div className="rounded-2xl border border-white/10 bg-white/[0.04] p-4 text-sm text-white/60">
             No trades in this tab.
