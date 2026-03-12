@@ -11,7 +11,12 @@ const pool = new Pool({
 
 const KEY = "strategy_flags";
 
-const DEFAULT_FLAGS = { matches: true, overunder: true, risefall: true };
+const DEFAULT_FLAGS = {
+  matches: true,
+  overunder: true,
+  risefall: true,
+  mspider: true,
+};
 
 export async function GET() {
   try {
@@ -20,13 +25,17 @@ export async function GET() {
       [KEY]
     );
 
-    if (!rows.length) return NextResponse.json({ ok: true, flags: DEFAULT_FLAGS });
+    if (!rows.length) {
+      return NextResponse.json({ ok: true, flags: DEFAULT_FLAGS });
+    }
 
     const value = rows[0].value ?? {};
+
     const flags = {
       matches: typeof value.matches === "boolean" ? value.matches : true,
       overunder: typeof value.overunder === "boolean" ? value.overunder : true,
       risefall: typeof value.risefall === "boolean" ? value.risefall : true,
+      mspider: typeof value.mspider === "boolean" ? value.mspider : true,
     };
 
     return NextResponse.json({ ok: true, flags });
@@ -42,13 +51,14 @@ export async function POST(req: Request) {
   try {
     const body = await req.json();
 
-    // accept {flags:{...}} OR {matches, overunder, risefall}
+    // accept { flags: {...} } OR direct object
     const src = body?.flags ?? body;
 
     const flags = {
-      matches: !!src?.matches,
-      overunder: !!src?.overunder,
-      risefall: !!src?.risefall,
+      matches: typeof src?.matches === "boolean" ? src.matches : true,
+      overunder: typeof src?.overunder === "boolean" ? src.overunder : true,
+      risefall: typeof src?.risefall === "boolean" ? src.risefall : true,
+      mspider: typeof src?.mspider === "boolean" ? src.mspider : true,
     };
 
     await pool.query(

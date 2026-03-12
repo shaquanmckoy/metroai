@@ -9,10 +9,10 @@ const pool = new Pool({
   ssl: { rejectUnauthorized: false },
 });
 
-// 🔑 NEW KEY (different from strategy_flags)
+// key in database
 const KEY = "ui_flags";
 
-// ✅ buttons / panels you want to hide/show for USERS
+// all UI buttons/panels that can be hidden for users
 const DEFAULT_UI_FLAGS = {
   metro_place_trade: true,
   metro_edshell: true,
@@ -24,6 +24,12 @@ const DEFAULT_UI_FLAGS = {
   spider_analyzer: true,
   spider_manual_over_under: true,
   spider_random_auto: true,
+
+  risefall_manual: true,
+  risefall_double: true,
+
+  mspider_manual: true,
+  mspider_optimizer: true,
 };
 
 export async function GET() {
@@ -33,16 +39,23 @@ export async function GET() {
       [KEY]
     );
 
-    if (!rows.length) return NextResponse.json({ ok: true, flags: DEFAULT_UI_FLAGS });
+    if (!rows.length) {
+      return NextResponse.json({ ok: true, flags: DEFAULT_UI_FLAGS });
+    }
 
     const value = rows[0].value ?? {};
+
     const flags = {
       metro_place_trade:
         typeof value.metro_place_trade === "boolean" ? value.metro_place_trade : true,
-      metro_edshell: typeof value.metro_edshell === "boolean" ? value.metro_edshell : true,
-      metro_3x: typeof value.metro_3x === "boolean" ? value.metro_3x : true,
-      metro_5x: typeof value.metro_5x === "boolean" ? value.metro_5x : true,
-      metro_1x_auto: typeof value.metro_1x_auto === "boolean" ? value.metro_1x_auto : true,
+      metro_edshell:
+        typeof value.metro_edshell === "boolean" ? value.metro_edshell : true,
+      metro_3x:
+        typeof value.metro_3x === "boolean" ? value.metro_3x : true,
+      metro_5x:
+        typeof value.metro_5x === "boolean" ? value.metro_5x : true,
+      metro_1x_auto:
+        typeof value.metro_1x_auto === "boolean" ? value.metro_1x_auto : true,
       metro_fast_auto:
         typeof value.metro_fast_auto === "boolean" ? value.metro_fast_auto : true,
 
@@ -54,6 +67,16 @@ export async function GET() {
           : true,
       spider_random_auto:
         typeof value.spider_random_auto === "boolean" ? value.spider_random_auto : true,
+
+      risefall_manual:
+        typeof value.risefall_manual === "boolean" ? value.risefall_manual : true,
+      risefall_double:
+        typeof value.risefall_double === "boolean" ? value.risefall_double : true,
+
+      mspider_manual:
+        typeof value.mspider_manual === "boolean" ? value.mspider_manual : true,
+      mspider_optimizer:
+        typeof value.mspider_optimizer === "boolean" ? value.mspider_optimizer : true,
     };
 
     return NextResponse.json({ ok: true, flags });
@@ -83,6 +106,12 @@ export async function POST(req: Request) {
       spider_analyzer: !!src?.spider_analyzer,
       spider_manual_over_under: !!src?.spider_manual_over_under,
       spider_random_auto: !!src?.spider_random_auto,
+
+      risefall_manual: !!src?.risefall_manual,
+      risefall_double: !!src?.risefall_double,
+
+      mspider_manual: !!src?.mspider_manual,
+      mspider_optimizer: !!src?.mspider_optimizer,
     };
 
     await pool.query(
