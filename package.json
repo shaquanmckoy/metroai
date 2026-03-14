@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "bcryptjs": "^3.0.3",
+    "lightweight-charts": "^5.1.0",
     "metaapi.cloud-sdk": "^29.3.3",
     "next": "16.1.1",
     "pg": "^8.17.1",

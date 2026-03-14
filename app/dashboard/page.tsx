@@ -1,5 +1,6 @@
 "use client";
 
+import DerivChart from "@/components/DerivChart";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 
@@ -312,10 +313,12 @@ function MarketIndicator({
   activeStrategy,
   selectedPair,
   pairDigitsRef,
+  pairQuotesRef,
 }: {
   activeStrategy: "matches" | "overunder" | "risefall" | "mspider" | null;
   selectedPair: Pair;
   pairDigitsRef: React.MutableRefObject<Record<Pair, number[]>>;
+  pairQuotesRef: React.MutableRefObject<Record<Pair, number[]>>;
 }) {
   const [now, setNow] = useState(() => new Date());
   // ✅ Risk memory (per index) — prevents flip-flopping
@@ -337,7 +340,8 @@ const riskHistRef = useRef<Record<string, number[]>>({});
 
   // ===================== INDEX TYPE =====================
   const is1HZ = selectedPair.startsWith("1HZ");
-  const isJump = selectedPair.startsWith("JD") || selectedPair === "RDBEAR" || selectedPair === "RDBULL";
+const isJump = selectedPair.startsWith("JD") || selectedPair === "RDBEAR" || selectedPair === "RDBULL";
+const isStep = selectedPair.startsWith("STPRNG");
 
   // ===================== SESSIONS (UTC) =====================
   const inAsia = utcTotalMin >= 0 * 60 && utcTotalMin < 9 * 60;
@@ -396,7 +400,122 @@ const riskHistRef = useRef<Record<string, number[]>>({});
   const last20 = ticksAll.slice(-20);
   const last10 = ticksAll.slice(-10);
   const last5 = ticksAll.slice(-5);
+  const quotesAll = pairQuotesRef.current[selectedPair] ?? [];
+const quoteLast60 = quotesAll.slice(-60);
+const quoteLast30 = quotesAll.slice(-30);
+const quoteLast15 = quotesAll.slice(-15);
+const quoteLast8 = quotesAll.slice(-8);
+const quoteLast5 = quotesAll.slice(-5);
 
+const readyQuotes = quoteLast15.length >= 15;
+
+const getNetMove = (arr: number[]) => {
+  if (arr.length < 2) return 0;
+  return arr[arr.length - 1] - arr[0];
+};
+
+const countDirectionalMoves = (arr: number[]) => {
+  let up = 0;
+  let down = 0;
+  let flat = 0;
+
+  for (let i = 1; i < arr.length; i++) {
+    if (arr[i] > arr[i - 1]) up++;
+    else if (arr[i] < arr[i - 1]) down++;
+    else flat++;
+  }
+
+  return { up, down, flat };
+};
+
+const analyzeQuoteTrend = (quotes: number[]) => {
+  const q30 = quotes.slice(-30);
+  const q15 = quotes.slice(-15);
+  const q8 = quotes.slice(-8);
+  const q5 = quotes.slice(-5);
+
+  const ready = q15.length >= 15;
+  const move15 = getNetMove(q15);
+  const move8 = getNetMove(q8);
+  const move5 = getNetMove(q5);
+  const m15 = countDirectionalMoves(q15);
+
+  const bias: "Rise" | "Fall" | "Wait" =
+    !ready
+      ? "Wait"
+      : move15 > 0 && m15.up >= m15.down && move8 >= 0
+      ? "Rise"
+      : move15 < 0 && m15.down >= m15.up && move8 <= 0
+      ? "Fall"
+      : "Wait";
+
+  const trendStrength =
+    Math.abs(move15) + Math.abs(move8 * 0.8) + Math.abs(move5 * 0.6);
+
+  const directionalControl = Math.abs(m15.up - m15.down);
+  const confidence = clampPercent(
+    ready ? 45 + trendStrength * 10 + directionalControl * 3 : 0
+  );
+
+  const range30 = q30.length ? Math.max(...q30) - Math.min(...q30) : 0;
+
+  const doubleEntryScore = clampPercent(
+    ready ? 35 + range30 * 8 + directionalControl * 4 + Math.abs(move8) * 12 : 0
+  );
+
+  return {
+    ready,
+    move15,
+    move8,
+    move5,
+    m15,
+    bias,
+    confidence,
+    range30,
+    doubleEntryScore,
+  };
+};
+
+const selectedTrend = analyzeQuoteTrend(quotesAll);
+const recentMove15 = selectedTrend.move15;
+const recentMove8 = selectedTrend.move8;
+const microMove5 = selectedTrend.move5;
+const movement15 = selectedTrend.m15;
+const movement8 = countDirectionalMoves(quoteLast8);
+const predictionConfidence = selectedTrend.confidence;
+const predictionBias: "Rise" | "Fall" | "Wait" = selectedTrend.bias;
+
+const predictionSummary = !readyQuotes
+  ? "Collecting quote history for Rise/Fall prediction summary…"
+  : predictionBias === "Rise"
+  ? `Bias: RISE • Net15 ${recentMove15.toFixed(2)} • Up moves ${movement15.up}/${quoteLast15.length - 1} • Confidence ${predictionConfidence.toFixed(0)}%`
+  : predictionBias === "Fall"
+  ? `Bias: FALL • Net15 ${recentMove15.toFixed(2)} • Down moves ${movement15.down}/${quoteLast15.length - 1} • Confidence ${predictionConfidence.toFixed(0)}%`
+  : `Bias: WAIT • Mixed structure on ${selectedPair} • Net15 ${recentMove15.toFixed(2)} • Confidence ${predictionConfidence.toFixed(0)}%`;
+
+  const stepRankings = STEP_ONLY_PAIRS.map((pair) => {
+  const trend = analyzeQuoteTrend(pairQuotesRef.current[pair] ?? []);
+  return {
+    pair,
+    trend,
+    ready: trend.ready,
+    bias: trend.bias,
+    confidence: trend.confidence,
+    score: trend.doubleEntryScore,
+    range30: trend.range30,
+  };
+})
+  .filter((row) => row.ready)
+  .sort((a, b) => b.score - a.score);
+
+const bestStepPair = stepRankings[0] ?? null;
+
+const stepPredictionSummary = !bestStepPair
+  ? "Collecting live Step index quote history for double Rise + Fall ranking…"
+  : `Best Step pair now: ${bestStepPair.pair} • ${bestStepPair.bias} bias • Double-entry score ${bestStepPair.score.toFixed(
+      0
+    )}% • Trend confidence ${bestStepPair.confidence.toFixed(0)}% • 30-tick range ${bestStepPair.range30.toFixed(2)}`;
+  
   const ready20 = last20.length >= 20;
   const ready50 = last50.length >= 50;
   const ready200 = last200.length >= 200;
@@ -563,13 +682,17 @@ const chiSquareUniform = (f: number[], n: number) => {
 
   // instrument risk
   if (is1HZ) {
-    riskScore += 2;
-    riskReasons.push("1HZ speed risk (execution errors)");
-  }
-  if (isJump) {
-    riskScore += 2;
-    riskReasons.push("Jump/Bull/Bear spike risk");
-  }
+  riskScore += 2;
+  riskReasons.push("1HZ speed risk (execution errors)");
+}
+if (isJump) {
+  riskScore += 2;
+  riskReasons.push("Jump/Bull/Bear spike risk");
+}
+if (isStep) {
+  riskScore += 1;
+  riskReasons.push("Step index can stair-step hard during short reversals");
+}
 
  // ✅ LIVE behavior risk (UPGRADED)
 if (!ready20) {
@@ -708,6 +831,40 @@ if (riskLevel === "HIGH" && !sustainedHigh) {
       return `MetroX: R_25 / R_50 stable. 1HZ only if you can control entries.\n${edgeTxt}`;
     }
 
+    if (activeStrategy === "risefall") {
+  const rfEdgeTxt = readyQuotes
+    ? `Prediction summary: ${predictionSummary}`
+    : "Prediction summary: collecting live quote history…";
+
+  if (isStep) {
+    if (riskLevel === "HIGH") {
+return `Rise/Fall: Step indexes are too aggressive right now. Prefer waiting for a cleaner structure before using ${selectedPair}.${bestStepPair ? ` Best live Step pair: ${bestStepPair.pair} (${bestStepPair.score.toFixed(0)}%).` : ""}\n${rfEdgeTxt}`;    }
+
+    if (predictionBias === "Rise") {
+      return `Rise/Fall: ${selectedPair} currently leans bullish. Step indexes can work when directional control stays clean, but keep size smaller than volatility pairs.\n${rfEdgeTxt}`;
+    }
+
+    if (predictionBias === "Fall") {
+      return `Rise/Fall: ${selectedPair} currently leans bearish. Step indexes are tradable here only when momentum stays one-sided over the last 8–15 ticks.\n${rfEdgeTxt}`;
+    }
+
+return `Rise/Fall: ${selectedPair} is a Step index, but the tape is mixed right now. Wait for stronger directional control before entering.${bestStepPair ? ` Best live Step pair: ${bestStepPair.pair} (${bestStepPair.score.toFixed(0)}%).` : ""}\n${rfEdgeTxt}`;  }
+
+  if (riskLevel === "HIGH") {
+    return `Rise/Fall: stay with smoother volatility pairs and wait for clearer direction. Avoid forcing entries into noisy conditions.\n${rfEdgeTxt}`;
+  }
+
+  if (predictionBias === "Rise") {
+    return `Rise/Fall: current selected pair leans toward Rise continuation. Use cleaner volatility pairs first, then Step indexes only when structure remains stable.\n${rfEdgeTxt}`;
+  }
+
+  if (predictionBias === "Fall") {
+    return `Rise/Fall: current selected pair leans toward Fall continuation. Step indexes are secondary here unless the tape keeps trending cleanly.\n${rfEdgeTxt}`;
+  }
+
+  return `Rise/Fall: no clean directional edge yet. Wait for a better quote structure before trading.\n${rfEdgeTxt}`;
+}
+
     // SpiderX
     const edgeTxt =
       spiderEdge && ready20
@@ -720,11 +877,13 @@ if (riskLevel === "HIGH" && !sustainedHigh) {
   })();
 
   const conflictWarning =
-    riskLevel === "HIGH" && (is1HZ || isJump)
-      ? "⚠️ Current index type is HIGH-risk for current conditions. Consider switching to R_25 / R_50."
-      : riskLevel === "MEDIUM" && isJump
-      ? "⚠️ Jump/Bull/Bear is riskier in medium conditions — only trade strongest edge."
-      : "";
+  riskLevel === "HIGH" && (is1HZ || isJump || isStep)
+    ? "⚠️ Current index type is HIGH-risk for current conditions. Consider switching to R_25 / R_50 or waiting for a cleaner setup."
+    : riskLevel === "MEDIUM" && isJump
+    ? "⚠️ Jump/Bull/Bear is riskier in medium conditions — only trade strongest edge."
+    : riskLevel !== "LOW" && isStep
+    ? "⚠️ Step indexes need cleaner one-way structure. Mixed movement can break Rise/Fall entries quickly."
+    : "";
 
   // display a compact “market behavior” line
   const behaviorLine = ready50
@@ -769,12 +928,46 @@ if (riskLevel === "HIGH" && !sustainedHigh) {
       </div>
 
       <div className="mt-3 rounded-xl bg-white/5 border border-white/10 p-3">
-        <p className="text-[11px] text-white/60">Index recommendation (live)</p>
-        <p className="text-xs text-white/75 mt-1 whitespace-pre-line">{indexTip}</p>
+  <p className="text-[11px] text-white/60">Index recommendation (live)</p>
+  <p className="text-xs text-white/75 mt-1 whitespace-pre-line">{indexTip}</p>
 
-        {conflictWarning && <p className="text-[11px] mt-2 text-yellow-200/90">{conflictWarning}</p>}
+  {conflictWarning && <p className="text-[11px] mt-2 text-yellow-200/90">{conflictWarning}</p>}
 
-        <div className="mt-3">
+  {activeStrategy === "risefall" && (
+  <div className="mt-3 rounded-xl bg-black/20 border border-white/10 p-3">
+    <p className="text-[11px] text-white/60">Prediction summary</p>
+    <p className="text-xs text-white/80 mt-1">{predictionSummary}</p>
+    <p className="text-[11px] text-white/55 mt-2">
+      Last 30 / 15 / 5 net move: {getNetMove(quoteLast30).toFixed(2)} / {recentMove15.toFixed(2)} / {microMove5.toFixed(2)}
+    </p>
+
+    {isStep && (
+      <div className="mt-3 rounded-xl bg-white/5 border border-white/10 p-3">
+        <p className="text-[11px] text-white/60">Live Step prediction</p>
+        <p className="text-xs text-white/80 mt-1">{stepPredictionSummary}</p>
+
+        {bestStepPair && (
+          <p className="text-[11px] text-emerald-300 mt-2">
+            Double Rise + Fall focus: {bestStepPair.pair} • Score {bestStepPair.score.toFixed(0)}% • Bias {bestStepPair.bias} • Confidence {bestStepPair.confidence.toFixed(0)}%
+          </p>
+        )}
+
+        <div className="mt-2 space-y-1">
+          {stepRankings.slice(0, 5).map((row) => (
+            <div key={row.pair} className="flex items-center justify-between text-[11px] text-white/70">
+              <span>{row.pair}</span>
+              <span>
+                Score {row.score.toFixed(0)}% • {row.bias} • {row.confidence.toFixed(0)}%
+              </span>
+            </div>
+          ))}
+        </div>
+      </div>
+    )}
+  </div>
+)}
+
+  <div className="mt-3">
           <p className="text-[11px] text-white/60 mb-1">Why this risk?</p>
           {riskReasons.length === 0 ? (
             <p className="text-[11px] text-white/55">No major risk flags detected.</p>
@@ -1007,8 +1200,16 @@ useEffect(() => {
 }, [activeStrategy]);
   const [selectedPair, setSelectedPair] = useState<Pair>(PAIRS[0]);
   useEffect(() => {
-  selectedPairRef.current = selectedPair;
-}, [selectedPair]);
+    selectedPairRef.current = selectedPair;
+
+    if (activeStrategyRef.current === "risefall") {
+      setTicks(pairDigitsRef.current[selectedPair] ?? []);
+    }
+  }, [selectedPair]);
+
+  // ===== Live chart quotes (used for the chart panel) =====
+  const chartQuotes =
+    pairQuotesRef.current[selectedPair]?.slice(-150) ?? [];
 // ================= METRO AUTO (NEW) =================
 const [metroRunning, setMetroRunning] = useState(false);
 const metroCancelRef = useRef(false);
@@ -1327,12 +1528,16 @@ return;
 }
 
       if (data.msg_type === "authorize") {
-        authorizedRef.current = true;
-        setConnected(true);
+  authorizedRef.current = true;
+  setConnected(true);
 
-        safeSend({ balance: 1, subscribe: 1 });
-        subscribeAllPairs(METRO_SPIDER_PAIRS);
-      }
+  safeSend({ balance: 1, subscribe: 1 });
+  subscribeAllPairs(METRO_SPIDER_PAIRS);
+
+  STEP_ONLY_PAIRS.forEach((pair) => {
+    safeSend({ ticks: pair, subscribe: 1 });
+  });
+}
 
       if (data.msg_type === "balance") {
         setBalance(Number(data.balance.balance));
@@ -1377,7 +1582,13 @@ pairQuotesRef.current[symbol] = nextQuotes;
     setPairMeta((m) => ({ ...m, [symbol]: { ...m[symbol], count: next.length } }));
   }
 
-  if (symbol === selectedPairRef.current) setTicks(next);
+  if (symbol === selectedPairRef.current) {
+  setTicks(next);
+
+  if (symbol.startsWith("STPRNG")) {
+    setPipSize(ps);
+  }
+}
 }
 
      // proposal preview or proposal -> buy
@@ -2432,8 +2643,15 @@ const toggleSpiderRandomAuto = async () => {
   if (activeStrategy !== "risefall") return;
   if (!selectedPair) return;
 
-  // Only subscribe to the currently selected Rise/Fall pair
-  safeSend({ ticks: selectedPair, subscribe: 1 });
+  if (selectedPair.startsWith("STPRNG")) {
+    STEP_ONLY_PAIRS.forEach((pair) => {
+      safeSend({ ticks: pair, subscribe: 1 });
+    });
+    setTicks(pairQuotesRef.current[selectedPair] ?? []);
+  } else {
+    safeSend({ ticks: selectedPair, subscribe: 1 });
+    setTicks(pairQuotesRef.current[selectedPair] ?? []);
+  }
 }, [activeStrategy, connected, selectedPair]);
   useEffect(() => {
   setMetroXResetKey((k) => k + 1);
@@ -2602,6 +2820,7 @@ const toggleSpiderRandomAuto = async () => {
   activeStrategy={activeStrategy}
   selectedPair={selectedPair}
   pairDigitsRef={pairDigitsRef}
+  pairQuotesRef={pairQuotesRef}
 />
 </div>
             <div className="bg-[#13233d]/80 backdrop-blur rounded-2xl p-6 border border-white/10 shadow-[0_0_0_1px_rgba(255,255,255,0.06)]">
@@ -4650,10 +4869,13 @@ setRfAllowEquals: React.Dispatch<React.SetStateAction<boolean>>;
 
         <div className="mt-5 bg-black/20 border border-white/10 rounded-xl p-4">
           <div className="flex items-center justify-between gap-3">
-            <div>
-              <p className="text-sm font-semibold text-white/85">Live tick tape</p>
-              <p className="text-[11px] text-white/50 mt-1">Last 8 quotes for the selected pair</p>
-            </div>
+            <div className="rounded-xl bg-black/20 border border-white/10 p-3">
+  <p className="text-[11px] text-white/60 mb-2">
+  Live Market Chart — {selectedPair}
+</p>
+
+
+<DerivChart symbol={selectedPair} /></div>
             <span className="text-[11px] text-white/60">{selectedPair}</span>
           </div>
 
