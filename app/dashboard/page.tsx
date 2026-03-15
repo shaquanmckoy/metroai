@@ -41,8 +41,8 @@ export const INDEX_GROUPS = {
     { code: "STPRNG", label: "STEP INDEX 100" },
     { code: "STPRNG2", label: "STEP INDEX 200" },
     { code: "STPRNG3", label: "STEP INDEX 300" },
-    { code: "STPRNG4", label: "STEP INDEX 500" },
-    { code: "STPRNG5", label: "STEP INDEX 1000" },
+    { code: "STPRNG4", label: "STEP INDEX 400" },
+    { code: "STPRNG5", label: "STEP INDEX 500" },
   ],
 };
 
@@ -1205,7 +1205,18 @@ useEffect(() => {
     if (activeStrategyRef.current === "risefall") {
       setTicks(pairDigitsRef.current[selectedPair] ?? []);
     }
-  }, [selectedPair]);
+
+    if (connected && authorizedRef.current) {
+      safeSend({ ticks: selectedPair, subscribe: 1 });
+    }
+  }, [selectedPair, connected]);
+
+  useEffect(() => {
+    if (activeStrategy === "risefall" && connected && authorizedRef.current) {
+      safeSend({ ticks: selectedPair, subscribe: 1 });
+      setTicks(pairDigitsRef.current[selectedPair] ?? []);
+    }
+  }, [activeStrategy, selectedPair, connected]);
 
   // ===== Live chart quotes (used for the chart panel) =====
   const chartQuotes =
@@ -1517,8 +1528,11 @@ reqInfoRef.current = {};
   // Turbo: do NOT alert (but we did reject waiters so queue doesn't hang)
   if (req_id && reqInfoRef.current[req_id]?.turbo) return;
 
-  // Ignore popup alerts for invalid Step-index subscriptions
-if (isInvalidSymbolError && isStepOnlySymbol) return;
+  // Ignore duplicate/harmless subscription popups, but do not silently swallow real Step subscription failures
+if (isInvalidSymbolError && isStepOnlySymbol) {
+  console.warn(`Step index subscription failed for ${tickSymbol}: ${msg}`);
+  return;
+}
 
 // Ignore harmless duplicate tick subscriptions (R_10 already subscribed)
 if (isAlreadySubscribedError && tickSymbol) return;
@@ -4742,25 +4756,76 @@ setRfAllowEquals: React.Dispatch<React.SetStateAction<boolean>>;
     const arrow = move > 0 ? "↑" : move < 0 ? "↓" : "→";
     return { value: q, arrow, tone };
   });
-  
+
+  const [rfSelectedAction, setRfSelectedAction] = useState<"Rise" | "Fall" | "Both" | "Auto" | null>(null);
+  const rfSelectedResetRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const triggerRfSelectedAction = (action: "Rise" | "Fall" | "Both" | "Auto") => {
+    setRfSelectedAction(action);
+
+    if (rfSelectedResetRef.current) {
+      clearTimeout(rfSelectedResetRef.current);
+    }
+
+    rfSelectedResetRef.current = setTimeout(() => {
+      setRfSelectedAction(null);
+      rfSelectedResetRef.current = null;
+    }, 3000);
+  };
+
+  // Cleanup effect for rfSelectedResetRef timer
+  useEffect(() => {
+    return () => {
+      if (rfSelectedResetRef.current) {
+        clearTimeout(rfSelectedResetRef.current);
+      }
+    };
+  }, []);
 
   return (
-    <div className="rounded-2xl border border-white/10 overflow-hidden shadow-[0_0_0_1px_rgba(255,255,255,0.06)]">
-      <div className="bg-gradient-to-br from-[#1b2235]/95 to-[#121826] p-6">
-        <div className="flex items-start justify-between gap-3">
+    <div className="overflow-hidden rounded-[28px] border border-cyan-400/15 bg-[radial-gradient(circle_at_top_left,rgba(59,130,246,0.18),rgba(15,23,42,0.95)_45%,rgba(2,6,23,0.98))] shadow-[0_25px_80px_rgba(0,0,0,0.45)]">
+      <div className="p-6 md:p-7">
+        <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
           <div>
-            <p className="text-lg font-semibold text-white/90">Rise/Fall</p>
-            <p className="text-xs text-white/60 mt-1">
-              Smart trend mode: reads live ticks for the selected pair and auto-decides Rise or Fall
-            </p>
+            <div className="flex items-center gap-3">
+              <div className="flex h-12 w-12 items-center justify-center rounded-2xl border border-cyan-400/25 bg-cyan-500/10 text-xl text-cyan-300">
+                ↕
+              </div>
+              <div>
+                <p className="text-[1.9rem] font-bold tracking-tight text-white">Rise/Fall</p>
+                <p className="mt-1 text-sm text-white/55">
+                  Smart trend mode reads live ticks and suggests the strongest direction.
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap gap-2">
+            <span className="inline-flex items-center rounded-full border border-cyan-400/20 bg-cyan-500/10 px-3 py-1 text-[11px] font-semibold uppercase tracking-wide text-cyan-200">
+              Pair: {selectedPair}
+            </span>
+            <span className="inline-flex items-center rounded-full border border-white/10 bg-white/5 px-3 py-1 text-[11px] font-semibold uppercase tracking-wide text-white/70">
+              Stake: {stake.toFixed(2)} {currency}
+            </span>
+            <span className="inline-flex items-center rounded-full border border-white/10 bg-white/5 px-3 py-1 text-[11px] font-semibold uppercase tracking-wide text-white/70">
+              {rfTickDuration} Tick{rfTickDuration > 1 ? "s" : ""}
+            </span>
           </div>
         </div>
 
-        <div className="mt-5 grid grid-cols-1 md:grid-cols-2 gap-4">
-          <div className="bg-black/30 rounded-xl p-4 border border-white/10">
-            <p className="text-[11px] text-white/60 uppercase tracking-wide">Index</p>
+        <div className="mt-6 grid grid-cols-1 gap-5 xl:grid-cols-12">
+          <div className="xl:col-span-6 rounded-[24px] border border-white/10 bg-[linear-gradient(135deg,rgba(15,23,42,0.92),rgba(2,6,23,0.96))] p-5 shadow-[0_0_0_1px_rgba(255,255,255,0.02)]">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <p className="text-[11px] uppercase tracking-[0.24em] text-white/45">Index</p>
+                <p className="mt-1 text-sm text-white/65">Choose the market for live Rise/Fall analysis.</p>
+              </div>
+              <div className="rounded-xl border border-sky-400/20 bg-sky-500/10 px-3 py-1 text-xs font-semibold text-sky-200">
+                Live
+              </div>
+            </div>
             <select
-              className="mt-2 w-full bg-black/40 px-3 py-2 rounded-md border border-white/10"
+              className="mt-4 w-full rounded-xl border border-white/10 bg-black/40 px-4 py-3 text-base text-white outline-none transition focus:border-cyan-400/40 focus:ring-2 focus:ring-cyan-400/20"
               value={selectedPair}
               onChange={(e) => setSelectedPair(e.target.value as Pair)}
             >
@@ -4772,97 +4837,120 @@ setRfAllowEquals: React.Dispatch<React.SetStateAction<boolean>>;
             </select>
           </div>
 
-          <div className="bg-black/30 rounded-xl p-4 border border-white/10">
-            <p className="text-[11px] text-white/60 uppercase tracking-wide">Stake</p>
-            <div className="mt-2 flex items-center gap-2">
+          <div className="xl:col-span-6 rounded-[24px] border border-white/10 bg-[linear-gradient(135deg,rgba(15,23,42,0.92),rgba(2,6,23,0.96))] p-5 shadow-[0_0_0_1px_rgba(255,255,255,0.02)]">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <p className="text-[11px] uppercase tracking-[0.24em] text-white/45">Stake</p>
+                <p className="mt-1 text-sm text-white/65">Set your amount for each Rise/Fall entry.</p>
+              </div>
+              <div className="rounded-xl border border-white/10 bg-white/5 px-3 py-1 text-xs font-semibold text-white/75">
+                {currency}
+              </div>
+            </div>
+            <div className="mt-4 flex items-center gap-3">
               <input
                 type="number"
                 min={0}
                 step={0.01}
-                className="w-full bg-black/40 px-3 py-2 rounded-md border border-white/10"
+                className="w-full rounded-xl border border-white/10 bg-black/40 px-4 py-3 text-base text-white outline-none transition focus:border-cyan-400/40 focus:ring-2 focus:ring-cyan-400/20"
                 value={stake}
                 onChange={(e) => setStake(Number(e.target.value))}
               />
-              <span className="text-xs text-white/60">{currency}</span>
+              <span className="text-sm font-semibold text-white/55">{currency}</span>
             </div>
           </div>
 
-          <div className="bg-black/30 rounded-xl p-4 border border-white/10">
-            <p className="text-[11px] text-white/60 uppercase tracking-wide">Duration (ticks)</p>
+          <div className="xl:col-span-6 rounded-[24px] border border-white/10 bg-[linear-gradient(135deg,rgba(15,23,42,0.92),rgba(2,6,23,0.96))] p-5 shadow-[0_0_0_1px_rgba(255,255,255,0.02)]">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <p className="text-[11px] uppercase tracking-[0.24em] text-white/45">Duration</p>
+                <p className="mt-1 text-sm text-white/65">Shorter durations react faster. 3–10 ticks is usually cleaner.</p>
+              </div>
+              <div className="rounded-xl border border-amber-400/20 bg-amber-500/10 px-3 py-1 text-xs font-semibold text-amber-200">
+                Ticks
+              </div>
+            </div>
+
             <input
               type="number"
               min={1}
               step={1}
-              className="mt-2 w-full bg-black/40 px-3 py-2 rounded-md border border-white/10"
+              className="mt-4 w-full rounded-xl border border-white/10 bg-black/40 px-4 py-3 text-base text-white outline-none transition focus:border-cyan-400/40 focus:ring-2 focus:ring-cyan-400/20"
               value={rfTickDuration}
               onChange={(e) => setRfTickDuration(Math.max(1, Number(e.target.value) || 1))}
             />
-            <p className="text-[11px] text-white/50 mt-2">Tip: use 3–10 ticks and wait for a clear trend before entering.</p>
-            <div className="bg-black/30 rounded-xl p-4 border border-white/10">
-  <p className="text-[11px] text-white/60 uppercase tracking-wide">Allow Equals</p>
 
-  <label className="mt-3 flex items-center justify-between gap-3 cursor-pointer">
-    <div>
-      <p className="text-sm font-semibold text-white/85">Allow Equals</p>
-      <p className="text-[11px] text-white/50 mt-1">
-        When enabled, equal exit/entry spots count as a win for Rise and Fall trades.
-      </p>
-    </div>
-
-    <button
-      type="button"
-      aria-pressed={rfAllowEquals}
-      onClick={() => setRfAllowEquals((v) => !v)}
-      className={`w-12 h-6 rounded-full relative transition ${
-        rfAllowEquals ? "bg-emerald-500" : "bg-white/15"
-      }`}
-    >
-      <span
-        className={`absolute top-0.5 w-5 h-5 bg-white rounded-full transition ${
-          rfAllowEquals ? "right-0.5" : "left-0.5"
-        }`}
-      />
-    </button>
-  </label>
-
-  <p className="text-[11px] text-sky-300 mt-3">
-    Current mode: {rfAllowEquals ? "ON — Allow Equals active" : "OFF — strict Rise/Fall only"}
-  </p>
-</div>
+            <p className="mt-3 text-[12px] leading-6 text-white/45">
+              Tip: avoid entering too early when the trend is weak or sideways.
+            </p>
+          
           </div>
 
-          <div className="bg-black/30 rounded-xl p-4 border border-white/10">
-            <p className="text-[11px] text-white/60 uppercase tracking-wide">Trend engine</p>
-            <div className="mt-2 space-y-2 text-xs text-white/75">
-              <p>
-                Current quote: <span className="font-semibold text-white/90">{latestQuote !== null ? latestQuote : "Waiting for ticks..."}</span>
-              </p>
-              <p>
-                Trend:{" "}
-                <span
-                  className={`font-semibold ${
-                    trendDirection === "UPTREND"
-                      ? "text-emerald-300"
-                      : trendDirection === "DOWNTREND"
-                      ? "text-red-300"
-                      : "text-yellow-200"
-                  }`}
-                >
-                  {trendDirection}
+          <div className="xl:col-span-12 rounded-[24px] border border-white/10 bg-[linear-gradient(135deg,rgba(15,23,42,0.92),rgba(2,6,23,0.96))] p-5 shadow-[0_0_0_1px_rgba(255,255,255,0.02)]">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <p className="text-[11px] uppercase tracking-[0.24em] text-white/45">Trend Engine</p>
+                <p className="mt-1 text-sm text-white/65">Live signal quality, direction, and momentum.</p>
+              </div>
+              <span
+                className={`inline-flex rounded-full border px-3 py-1 text-[11px] font-bold uppercase tracking-wide ${
+                  trendDirection === "UPTREND"
+                    ? "border-emerald-400/25 bg-emerald-500/10 text-emerald-200"
+                    : trendDirection === "DOWNTREND"
+                    ? "border-rose-400/25 bg-rose-500/10 text-rose-200"
+                    : "border-amber-400/25 bg-amber-500/10 text-amber-200"
+                }`}
+              >
+                {trendDirection}
+              </span>
+            </div>
+
+            <div className="mt-5 grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
+              <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
+                <p className="text-[11px] uppercase tracking-wide text-white/45">Current Quote</p>
+                <p className="mt-2 text-2xl font-bold text-white">
+                  {latestQuote !== null ? latestQuote : "Waiting..."}
+                </p>
+              </div>
+
+              <div className="rounded-2xl border border-cyan-400/15 bg-cyan-500/8 p-4">
+                <p className="text-[11px] uppercase tracking-wide text-white/45">Auto Decision</p>
+                <p className="mt-2 text-2xl font-bold text-cyan-300">
+                  {recommendedTrade ?? "WAIT"}
+                </p>
+              </div>
+            </div>
+
+            <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-3">
+              <div className="rounded-2xl border border-emerald-400/12 bg-emerald-500/6 p-4">
+                <p className="text-[11px] uppercase tracking-wide text-white/45">Up Ticks</p>
+                <p className="mt-2 text-xl font-bold text-emerald-300">{upTicks}</p>
+              </div>
+              <div className="rounded-2xl border border-rose-400/12 bg-rose-500/6 p-4">
+                <p className="text-[11px] uppercase tracking-wide text-white/45">Down Ticks</p>
+                <p className="mt-2 text-xl font-bold text-rose-300">{downTicks}</p>
+              </div>
+              <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
+                <p className="text-[11px] uppercase tracking-wide text-white/45">Flat</p>
+                <p className="mt-2 text-xl font-bold text-white/80">{flatTicks}</p>
+              </div>
+            </div>
+
+            <div className="mt-4 rounded-2xl border border-white/10 bg-black/20 p-4 space-y-3 text-sm text-white/70">
+              <div className="flex items-center justify-between gap-3">
+                <span>Move 6 / 12 / 20</span>
+                <span className="font-semibold text-white/90">
+                  {shortMove.toFixed(4)} / {mediumMove.toFixed(4)} / {longMove.toFixed(4)}
                 </span>
-              </p>
-              <p>
-                Auto decision: <span className="font-semibold text-sky-300">{recommendedTrade ?? "WAIT / NO TRADE"}</span>
-              </p>
-              <p>
-                Up ticks: <span className="text-emerald-300">{upTicks}</span> • Down ticks: <span className="text-red-300">{downTicks}</span> • Flat: <span className="text-white/60">{flatTicks}</span>
-              </p>
-              <p>
-                Move 6/12/20: <span className="text-white/90">{shortMove.toFixed(4)} / {mediumMove.toFixed(4)} / {longMove.toFixed(4)}</span>
-              </p>
-              <p>
-                Avg tick move: <span className="text-white/90">{avgMove.toFixed(5)}</span> • Strength: <span className="text-white/90">{trendStrength.toFixed(4)}</span>
-              </p>
+              </div>
+              <div className="flex items-center justify-between gap-3">
+                <span>Avg Tick Move</span>
+                <span className="font-semibold text-white/90">{avgMove.toFixed(5)}</span>
+              </div>
+              <div className="flex items-center justify-between gap-3">
+                <span>Strength</span>
+                <span className="font-semibold text-white/90">{trendStrength.toFixed(4)}</span>
+              </div>
             </div>
           </div>
         </div>
@@ -4895,45 +4983,142 @@ setRfAllowEquals: React.Dispatch<React.SetStateAction<boolean>>;
           </div>
         </div>
 
-        <div className="mt-5 bg-black/20 border border-white/10 rounded-xl p-4">
+          <div className="mt-5 bg-black/20 border border-white/10 rounded-xl p-4">
           <p className="text-[11px] text-white/60 uppercase tracking-wide">Trade actions</p>
-          <div className="mt-3 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-2">
-  <button
-    onClick={() => recommendedTrade && onPlaceTrade(recommendedTrade, rfTickDuration)}
-    disabled={!recommendedTrade}
-    className={`text-sm font-semibold px-4 py-2 rounded-md ${
-      recommendedTrade
-        ? "bg-sky-500/90 hover:bg-sky-500 text-white"
-        : "bg-white/10 text-white/40 cursor-not-allowed"
-    }`}
-  >
-    Auto trade: {recommendedTrade ?? "Waiting..."}
-  </button>
 
-  <button
-    onClick={() => onPlaceTrade("Rise", rfTickDuration)}
-    className="bg-emerald-500/90 hover:bg-emerald-500 text-sm font-semibold px-4 py-2 rounded-md"
-  >
-    Manual Rise (CALL)
-  </button>
+          <div className="mt-4 space-y-3">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <button
+                type="button"
+                onClick={() => {
+                  triggerRfSelectedAction("Rise");
+                  onPlaceTrade("Rise", rfTickDuration);
+                }}
+                className={`rounded-xl px-4 py-4 text-center font-bold tracking-wide border transition-all duration-200 shadow-md ${
+  rfSelectedAction === "Rise"
+    ? "border-emerald-200 bg-gradient-to-r from-emerald-400 to-emerald-500 text-white ring-4 ring-emerald-300/60 shadow-[0_0_28px_rgba(16,185,129,0.50)]"
+    : "border-emerald-900/80 bg-gradient-to-r from-emerald-950 to-emerald-900 text-emerald-100/90 hover:border-emerald-700"
+}`}
+              >
+                <div className="flex items-center justify-center gap-2 text-2xl leading-none">
+                  <span>↑</span>
+                  <span>RISE</span>
+                  {rfSelectedAction === "Rise" && <span className="text-base">✓</span>}
+                </div>
+                <div className="mt-1.5 text-xl font-semibold opacity-95">${stake.toFixed(2)}</div>
+              </button>
 
-  <button
-    onClick={() => onPlaceTrade("Fall", rfTickDuration)}
-    className="bg-red-500/90 hover:bg-red-500 text-sm font-semibold px-4 py-2 rounded-md"
-  >
-    Manual Fall (PUT)
-  </button>
+              <button
+                type="button"
+                onClick={() => {
+                  triggerRfSelectedAction("Fall");
+                  onPlaceTrade("Fall", rfTickDuration);
+                }}
+                className={`rounded-xl px-4 py-4 text-center font-bold tracking-wide border transition-all duration-200 shadow-md ${
+  rfSelectedAction === "Fall"
+    ? "border-rose-200 bg-gradient-to-r from-rose-400 to-pink-500 text-white ring-4 ring-rose-300/60 shadow-[0_0_28px_rgba(244,63,94,0.50)]"
+    : "border-rose-900/80 bg-gradient-to-r from-rose-950 to-rose-900 text-rose-100/90 hover:border-rose-700"
+}`}
+              >
+                <div className="flex items-center justify-center gap-2 text-2xl leading-none">
+                  <span>↓</span>
+                  <span>FALL</span>
+                  {rfSelectedAction === "Fall" && <span className="text-base">✓</span>}
+                </div>
+                <div className="mt-1.5 text-xl font-semibold opacity-95">${stake.toFixed(2)}</div>
+              </button>
+            </div>
 
-  <button
-    onClick={() => onPlaceDoubleTrade(rfTickDuration)}
-    className="bg-violet-500/90 hover:bg-violet-500 text-sm font-semibold px-4 py-2 rounded-md"
-  >
-    Double Entry (Rise + Fall)
-  </button>
-</div>
+            <button
+              type="button"
+              onClick={() => {
+                triggerRfSelectedAction("Both");
+                onPlaceDoubleTrade(rfTickDuration);
+              }}
+              className={`w-full rounded-xl px-4 py-4 text-center font-bold tracking-wide border transition-all duration-200 shadow-md ${
+  rfSelectedAction === "Both"
+    ? "border-sky-200 bg-gradient-to-r from-blue-400 via-cyan-400 to-blue-500 text-white ring-4 ring-sky-300/60 shadow-[0_0_30px_rgba(56,189,248,0.50)]"
+    : "border-sky-900/80 bg-gradient-to-r from-slate-950 via-sky-950 to-slate-900 text-sky-100/90 hover:border-sky-700"
+}`}
+            >
+              <div className="flex items-center justify-center gap-2 text-2xl leading-none">
+                <span className="text-emerald-300">↑</span>
+                <span>RISE + FALL</span>
+                <span className="text-rose-300">↓</span>
+                {rfSelectedAction === "Both" && <span className="text-base text-white">✓</span>}
+              </div>
+              <div className="mt-1.5 text-xl font-semibold opacity-95">
+                2x ${stake.toFixed(2)} = {(stake * 2).toFixed(2)}
+              </div>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                triggerRfSelectedAction("Auto");
+                if (recommendedTrade) onPlaceTrade(recommendedTrade, rfTickDuration);
+              }}
+              disabled={!recommendedTrade}
+              className={`w-full rounded-xl px-4 py-3 text-center font-semibold border transition-all duration-200 ${
+  !recommendedTrade
+    ? "border-white/10 bg-slate-900 text-white/35 cursor-not-allowed"
+    : rfSelectedAction === "Auto"
+    ? "border-violet-200 bg-gradient-to-r from-violet-500 to-fuchsia-500 text-white ring-4 ring-violet-300/60 shadow-[0_0_28px_rgba(168,85,247,0.48)]"
+    : "border-violet-950/80 bg-gradient-to-r from-slate-950 to-violet-950 text-violet-100/90 hover:border-violet-700"
+}`}
+            >
+              <>
+                Auto trade: {recommendedTrade ?? "Waiting..."}
+                {rfSelectedAction === "Auto" && recommendedTrade && <span className="ml-2">✓</span>}
+              </>
+            </button>
+            <button
+  type="button"
+  aria-pressed={rfAllowEquals}
+  onClick={() => setRfAllowEquals((v) => !v)}
+  className={`w-full rounded-xl px-4 py-3 text-left font-semibold border transition-all duration-200 ${
+    rfAllowEquals
+      ? "border-emerald-200 bg-gradient-to-r from-emerald-500 to-teal-500 text-white ring-4 ring-emerald-300/60 shadow-[0_0_28px_rgba(16,185,129,0.48)]"
+      : "border-white/10 bg-slate-950 text-white/85 hover:border-white/20"
+  }`}
+>
+  <div className="flex items-center justify-between gap-4">
+    <div>
+      <div className="flex items-center gap-2 text-sm uppercase tracking-wide text-white/65">
+        <span>Allow Equals</span>
+        {rfAllowEquals && <span className="text-white">✓</span>}
+      </div>
+      <div className="mt-1 text-base font-bold text-white">
+        {rfAllowEquals ? "ON" : "OFF"}
+      </div>
+      <div className="mt-1 text-xs text-white/70">
+        Equal entry and exit spots count as a win for Rise and Fall trades.
+      </div>
+    </div>
+
+    <div
+      className={`relative h-7 w-14 rounded-full border transition ${
+        rfAllowEquals
+          ? "border-white/30 bg-white/20"
+          : "border-white/15 bg-black/30"
+      }`}
+    >
+      <span
+        className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition ${
+          rfAllowEquals ? "right-1" : "left-1"
+        }`}
+      />
+    </div>
+  </div>
+</button>
+          </div>
+
+          <p className="mt-2 text-[11px] font-medium text-cyan-300/90">
+            Selected: {rfSelectedAction ?? "None"}
+          </p>
           <p className="text-[11px] text-white/50 mt-2">
-  Auto follows the live trend engine. Double Entry places both Rise and Fall at the same time using the same pair, stake, and tick duration. Allow Equals applies to Auto, Manual Rise, Manual Fall, and Double Entry.
-</p>
+            Auto follows the live trend engine. Rise + Fall places both trades at the same time using the same pair, stake, and tick duration. Allow Equals applies to Auto, Rise, Fall, and Rise + Fall.
+          </p>
         </div>
 
         <StrategyTradeHistoryTab
