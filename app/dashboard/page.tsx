@@ -91,6 +91,23 @@ export const PAIRS = RISE_FALL_PAIRS;
 
 export type Pair = (typeof PAIRS)[number];
 
+type ActiveSymbolItem = {
+  symbol: string;
+  display_name?: string;
+  display_name_short?: string;
+};
+
+const STEP_PAIR_LABELS: Record<
+  Extract<Pair, "STPRNG" | "STPRNG2" | "STPRNG3" | "STPRNG4" | "STPRNG5">,
+  string
+> = {
+  STPRNG: "Step Index 100",
+  STPRNG2: "Step Index 200",
+  STPRNG3: "Step Index 300",
+  STPRNG4: "Step Index 400",
+  STPRNG5: "Step Index 500",
+};
+
 type TradeResult = "Win" | "Loss" | "Pending";
 type TradeType =
   | "Matches"
@@ -1136,10 +1153,16 @@ useEffect(() => {
 }, []);
 
   const wsRef = useRef<WebSocket | null>(null);
-  const authorizedRef = useRef(false);
-  const activeStrategyRef = useRef<"matches" | "overunder" | "risefall" | "mspider" | null>(null);
-  const selectedPairRef = useRef<Pair>(PAIRS[0]);
-  const lastEdshellAtRef = useRef(0);
+const authorizedRef = useRef(false);
+const activeStrategyRef = useRef<"matches" | "overunder" | "risefall" | "mspider" | null>(null);
+const selectedPairRef = useRef<Pair>(PAIRS[0]);
+const liveSymbolMapRef = useRef<Record<Pair, string>>(
+  Object.fromEntries(PAIRS.map((p) => [p, p])) as Record<Pair, string>
+);
+const liveSymbolReverseMapRef = useRef<Record<string, Pair>>(
+  Object.fromEntries(PAIRS.map((p) => [p, p])) as Record<string, Pair>
+);
+const lastEdshellAtRef = useRef(0);
   const [uiFlags, setUiFlags] = useState<UIFlags>(DEFAULT_UI_FLAGS);
   const [barrierOptimizerOpen, setBarrierOptimizerOpen] = useState(false);
 const [barrierOptimizerLive, setBarrierOptimizerLive] = useState(false);
@@ -1207,13 +1230,13 @@ useEffect(() => {
     }
 
     if (connected && authorizedRef.current) {
-      safeSend({ ticks: selectedPair, subscribe: 1 });
+      safeSend({ ticks: resolveLiveSymbol(selectedPair), subscribe: 1 });
     }
   }, [selectedPair, connected]);
 
   useEffect(() => {
     if (activeStrategy === "risefall" && connected && authorizedRef.current) {
-      safeSend({ ticks: selectedPair, subscribe: 1 });
+      safeSend({ ticks: resolveLiveSymbol(selectedPair), subscribe: 1 });
       setTicks(pairDigitsRef.current[selectedPair] ?? []);
     }
   }, [activeStrategy, selectedPair, connected]);
@@ -1305,6 +1328,41 @@ const [pairMeta, setPairMeta] = useState(emptyMeta);
     ws.send(JSON.stringify(payload));
     return true;
   };
+
+  const resolveLiveSymbol = (pair: Pair) => liveSymbolMapRef.current[pair] ?? pair;
+
+const normalizeIncomingPair = (symbol: string): Pair | null => {
+  const mapped = liveSymbolReverseMapRef.current[symbol];
+  if (mapped) return mapped;
+  return PAIRS.includes(symbol as Pair) ? (symbol as Pair) : null;
+};
+
+const syncLiveSymbolMap = (activeSymbols: ActiveSymbolItem[]) => {
+  const nextMap = Object.fromEntries(PAIRS.map((p) => [p, p])) as Record<Pair, string>;
+
+  activeSymbols.forEach((item) => {
+    const label = `${item.display_name ?? ""} ${item.display_name_short ?? ""}`.toLowerCase();
+
+    (Object.entries(STEP_PAIR_LABELS) as Array<
+      [Extract<Pair, "STPRNG" | "STPRNG2" | "STPRNG3" | "STPRNG4" | "STPRNG5">, string]
+    >).forEach(([pair, expectedLabel]) => {
+      const normalizedExpected = expectedLabel.toLowerCase();
+      const looseExpected = normalizedExpected.replace(" index", "");
+      if (
+        label.includes(normalizedExpected) ||
+        label.includes(looseExpected) ||
+        label.includes(normalizedExpected.replace(/\s+/g, ""))
+      ) {
+        nextMap[pair] = item.symbol;
+      }
+    });
+  });
+
+  liveSymbolMapRef.current = nextMap;
+  liveSymbolReverseMapRef.current = Object.fromEntries(
+    Object.entries(nextMap).map(([pair, symbol]) => [symbol, pair as Pair])
+  ) as Record<string, Pair>;
+};
 
   const newReqId = () => Date.now() + Math.floor(Math.random() * 1000);
   // ================= BUY QUEUE (prevents stuck Pending in Turbo) =================
@@ -1405,7 +1463,7 @@ useEffect(() => {
 
   const subscribeAllPairs = (pairs: readonly Pair[]) => {
   pairs.forEach((sym) => {
-    safeSend({ ticks: sym, subscribe: 1 });
+    safeSend({ ticks: resolveLiveSymbol(sym), subscribe: 1 });
   });
 };
 const resetPairNow = (p: Pair) => {
@@ -1514,8 +1572,9 @@ reqInfoRef.current = {};
   const msg: string = data.error.message;
   const req_id: number | undefined = data.req_id;
   const echo = data.echo_req ?? {};
-  const tickSymbol = typeof echo.ticks === "string" ? echo.ticks : null;
-  const isStepOnlySymbol = !!tickSymbol && STEP_ONLY_PAIRS.includes(tickSymbol as Pair);
+  const rawTickSymbol = typeof echo.ticks === "string" ? echo.ticks : null;
+const mappedTickPair = rawTickSymbol ? normalizeIncomingPair(rawTickSymbol) : null;
+const isStepOnlySymbol = !!mappedTickPair && STEP_ONLY_PAIRS.includes(mappedTickPair);
   const isInvalidSymbolError = /symbol .* invalid/i.test(msg);
   const isAlreadySubscribedError = /already subscribed/i.test(msg);
 
@@ -1530,27 +1589,29 @@ reqInfoRef.current = {};
 
   // Ignore duplicate/harmless subscription popups, but do not silently swallow real Step subscription failures
 if (isInvalidSymbolError && isStepOnlySymbol) {
-  console.warn(`Step index subscription failed for ${tickSymbol}: ${msg}`);
+  console.warn(`Step index subscription failed for ${rawTickSymbol}: ${msg}`);
+  setAnalysisStatus(`Step index feed failed for ${mappedTickPair}. Refreshing live symbol map...`);
+  safeSend({ active_symbols: "brief", product_type: "basic" });
   return;
 }
 
-// Ignore harmless duplicate tick subscriptions (R_10 already subscribed)
-if (isAlreadySubscribedError && tickSymbol) return;
+if (isAlreadySubscribedError && rawTickSymbol) return;
 
 alert(msg);
 return;
 }
 
-      if (data.msg_type === "authorize") {
+if (data.msg_type === "active_symbols" && Array.isArray(data.active_symbols)) {
+  syncLiveSymbolMap(data.active_symbols as ActiveSymbolItem[]);
+}
+
+     if (data.msg_type === "authorize") {
   authorizedRef.current = true;
   setConnected(true);
 
   safeSend({ balance: 1, subscribe: 1 });
-  subscribeAllPairs(METRO_SPIDER_PAIRS);
-
-  STEP_ONLY_PAIRS.forEach((pair) => {
-    safeSend({ ticks: pair, subscribe: 1 });
-  });
+  safeSend({ active_symbols: "brief", product_type: "basic" });
+  subscribeAllPairs(PAIRS);
 }
 
       if (data.msg_type === "balance") {
@@ -1559,8 +1620,8 @@ return;
       }
 
       if (data.msg_type === "tick" && data.tick?.quote !== undefined) {
-  const symbol = data.tick.symbol as Pair;
-  if (!PAIRS.includes(symbol)) return;
+  const symbol = normalizeIncomingPair(String(data.tick.symbol));
+if (!symbol) return;
 
  // ✅ allow ticks if ANY strategy is open OR Metro auto is running
 if (
@@ -1764,17 +1825,17 @@ const placeHigherLowerTrade = ({
 
   const parsedDuration = parseMSpiderDuration(String(durationValue));
 
-const trade: Trade = {
-  id: req_id,
-  symbol: selectedPair,
-  digit: 0,
-  type: direction,
-  stake: tradeStake,
-  durationTicks: parsedDuration.duration_unit === "t" ? parsedDuration.duration : 0,
-  result: "Pending",
-  createdAt: Date.now(),
-  source: "M-Spider",
-};
+  const trade: Trade = {
+    id: req_id,
+    symbol: selectedPair,
+    digit: 0,
+    type: direction,
+    stake: tradeStake,
+    durationTicks: parsedDuration.duration_unit === "t" ? parsedDuration.duration : 0,
+    result: "Pending",
+    createdAt: Date.now(),
+    source: "M-Spider",
+  };
 
   setTradeHistory((prev) => [trade, ...prev]);
 
@@ -1787,18 +1848,18 @@ const trade: Trade = {
 
   const { duration, duration_unit } = parseMSpiderDuration(String(durationValue));
 
-safeSend({
-  proposal: 1,
-  amount: tradeStake,
-  basis: "stake",
-  contract_type: getContractType(direction, false),
-  currency: currency || "USD",
-  symbol: selectedPair,
-  duration,
-  duration_unit,
-  barrier: String(barrier),
-  req_id,
-});
+  safeSend({
+    proposal: 1,
+    amount: tradeStake,
+    basis: "stake",
+    contract_type: getContractType(direction, false),
+    currency: currency || "USD",
+    symbol: resolveLiveSymbol(selectedPair),
+    duration,
+    duration_unit,
+    barrier: String(barrier),
+    req_id,
+  });
 };
 const requestHigherLowerPreview = async ({
   direction,
@@ -1831,7 +1892,7 @@ const requestHigherLowerPreview = async ({
       basis: "stake",
       contract_type: getContractType(direction, false),
       currency: currency || "USD",
-      symbol: selectedPair,
+      symbol: resolveLiveSymbol(selectedPair),
       duration,
       duration_unit,
       barrier: String(barrier),
@@ -1900,7 +1961,7 @@ const placeTrade = (type: TradeType, durationTicks: number) => {
     basis: "stake",
     contract_type: getContractType(type, rfAllowEquals),
     currency: currency || "USD",
-    symbol: selectedPair,
+    symbol: resolveLiveSymbol(selectedPair),
     duration: durationTicks,
     duration_unit: "t",
     req_id,
@@ -1954,7 +2015,7 @@ const placeDiffersInstant = async (
       createdAt: Date.now(),
       source, 
       batchIndex: opts?.batchTotal ? startIndex + i : undefined,
-batchTotal: opts?.batchTotal,                // ✅ FIX: label the trade source
+      batchTotal: opts?.batchTotal,                // ✅ FIX: label the trade source
     };
 
     setTradeHistory((prev: Trade[]) => [trade, ...prev]);
@@ -1973,7 +2034,7 @@ batchTotal: opts?.batchTotal,                // ✅ FIX: label the trade source
       basis: "stake",
       contract_type: CONTRACT_TYPE_MAP["Differs"],
       currency: currency || "USD",
-      symbol,
+      symbol: resolveLiveSymbol(symbol),
       duration: durationTicks,  // ✅ FIX: duration matches what's stored
       duration_unit: "t",
       barrier: String(digit),
@@ -2004,7 +2065,7 @@ batchTotal: opts?.batchTotal,                // ✅ FIX: label the trade source
       result: "Pending",
       createdAt: Date.now(),
       batchIndex: batch?.index,
-batchTotal: batch?.total,
+      batchTotal: batch?.total,
     };
 
     setTradeHistory((prev: Trade[]) => [trade, ...prev]);
@@ -2023,7 +2084,7 @@ batchTotal: batch?.total,
       basis: "stake",
       contract_type: CONTRACT_TYPE_MAP["Differs"],
       currency: currency || "USD",
-      symbol,
+      symbol: resolveLiveSymbol(symbol),
       duration: mdTickDuration,
       duration_unit: "t",
       barrier: String(digit),
@@ -2663,7 +2724,7 @@ const toggleSpiderRandomAuto = async () => {
     });
     setTicks(pairQuotesRef.current[selectedPair] ?? []);
   } else {
-    safeSend({ ticks: selectedPair, subscribe: 1 });
+    safeSend({ ticks: resolveLiveSymbol(selectedPair), subscribe: 1 });
     setTicks(pairQuotesRef.current[selectedPair] ?? []);
   }
 }, [activeStrategy, connected, selectedPair]);
@@ -4686,14 +4747,14 @@ function RiseFallPanel({
 }: {
   selectedPair: Pair;
   availablePairs: readonly Pair[];
-setSelectedPair: (p: Pair) => void;
-stake: number;
-setStake: (n: number) => void;
-rfTickDuration: number;
-setRfTickDuration: (n: number) => void;
-rfAllowEquals: boolean;
-setRfAllowEquals: React.Dispatch<React.SetStateAction<boolean>>;
-    onPlaceTrade: (type: "Rise" | "Fall", duration: number) => void;
+  setSelectedPair: (p: Pair) => void;
+  stake: number;
+  setStake: (n: number) => void;
+  rfTickDuration: number;
+  setRfTickDuration: (n: number) => void;
+  rfAllowEquals: boolean;
+  setRfAllowEquals: React.Dispatch<React.SetStateAction<boolean>>;
+  onPlaceTrade: (type: "Rise" | "Fall", duration: number) => void;
   onPlaceDoubleTrade: (duration: number) => void;
   currency: string;
   tradeHistory: Trade[];
@@ -4742,6 +4803,263 @@ setRfAllowEquals: React.Dispatch<React.SetStateAction<boolean>>;
       ? "Fall"
       : null;
 
+  const [rfSelectedAction, setRfSelectedAction] = useState<"Rise" | "Fall" | "Both" | "Auto" | "Dual Auto" | null>(null);
+  const rfSelectedResetRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [dualAutoEnabled, setDualAutoEnabled] = useState(false);
+  const dualAutoCooldownRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const dualAutoLastPlacedRef = useRef(0);
+  const [dualAutoCooldownLeft, setDualAutoCooldownLeft] = useState(0);
+  const [dualAutoScope, setDualAutoScope] = useState<"selected" | "best-step">("selected");
+
+  // Dual Auto confidence/cooldown logic
+  const totalTicks = tickMoves.length;
+const activeTicks = upTicks + downTicks;
+const activityRatio = totalTicks > 0 ? activeTicks / totalTicks : 0;
+const imbalance = Math.abs(upTicks - downTicks);
+const moveRange = last12Quotes.length
+  ? Math.max(...last12Quotes) - Math.min(...last12Quotes)
+  : 0;
+
+const avgAbsMove = tickMoves.length
+  ? tickMoves.reduce((sum, move) => sum + Math.abs(move), 0) / tickMoves.length
+  : 0;
+
+const last5Moves = tickMoves.slice(-5);
+const recentBurst = last5Moves.length
+  ? last5Moves.reduce((sum, move) => sum + Math.abs(move), 0) / last5Moves.length
+  : 0;
+
+const directionFlips = tickMoves.reduce((count, move, index, arr) => {
+  if (index === 0) return 0;
+  const prev = arr[index - 1];
+  if (move === 0 || prev === 0) return count;
+  return Math.sign(move) !== Math.sign(prev) ? count + 1 : count;
+}, 0);
+
+const durationVolatilityNeed =
+  rfTickDuration <= 2
+    ? 0.12
+    : rfTickDuration <= 5
+    ? 0.09
+    : rfTickDuration <= 10
+    ? 0.06
+    : 0.04;
+
+const dualAutoConfidence = Math.max(
+  0,
+  Math.min(
+    100,
+    activityRatio * 32 +
+      Math.min(22, avgAbsMove * 5000) +
+      Math.min(18, recentBurst * 6000) +
+      Math.min(14, moveRange * 2500) +
+      Math.min(8, directionFlips * 1.5) -
+      Math.min(18, flatTicks * 6) -
+      Math.min(12, imbalance * 2.5)
+  )
+);
+
+const dualAutoThreshold =
+  rfTickDuration <= 2
+    ? 88
+    : rfTickDuration <= 5
+    ? 84
+    : rfTickDuration <= 10
+    ? 80
+    : 76;
+
+const dualAutoReady =
+  last12Quotes.length >= 12 &&
+  latestQuote !== null &&
+  dualAutoConfidence >= dualAutoThreshold &&
+  activityRatio >= 0.85 &&
+  flatTicks <= 1 &&
+  avgAbsMove >= durationVolatilityNeed &&
+  recentBurst >= durationVolatilityNeed * 0.9 &&
+  moveRange >= durationVolatilityNeed * Math.max(2, Math.min(rfTickDuration, 6));
+
+  const dualAutoDurationOptions = [2, 4, 6, 8, 10] as const;
+
+const getDualDurationNeed = (ticks: number) =>
+  ticks <= 2 ? 0.12 : ticks <= 4 ? 0.095 : ticks <= 6 ? 0.075 : ticks <= 8 ? 0.055 : 0.04;
+
+const dualAutoDurationScores = dualAutoDurationOptions.map((ticks) => {
+  const need = getDualDurationNeed(ticks);
+
+  const fitScore =
+    activityRatio * 28 +
+    Math.min(24, (avgAbsMove / Math.max(need, 0.0001)) * 12) +
+    Math.min(20, (recentBurst / Math.max(need * 0.9, 0.0001)) * 10) +
+    Math.min(18, (moveRange / Math.max(need * Math.max(2, Math.min(ticks, 6)), 0.0001)) * 12) +
+    Math.min(8, directionFlips * 1.2) -
+    Math.min(20, flatTicks * 7) -
+    Math.min(14, imbalance * 2.5);
+
+  return {
+    ticks,
+    score: Math.max(0, Math.min(100, fitScore)),
+    ready:
+      last12Quotes.length >= 12 &&
+      latestQuote !== null &&
+      activityRatio >= 0.82 &&
+      flatTicks <= 1 &&
+      avgAbsMove >= need &&
+      recentBurst >= need * 0.85 &&
+      moveRange >= need * Math.max(2, Math.min(ticks, 6)),
+  };
+});
+
+const recommendedDualDuration =
+  dualAutoDurationScores
+    .slice()
+    .sort((a, b) => {
+      if (a.ready !== b.ready) return Number(b.ready) - Number(a.ready);
+      return b.score - a.score;
+    })[0] ?? { ticks: rfTickDuration, score: 0, ready: false };
+
+    const buildDualAutoMetrics = (pair: Pair) => {
+  const quotes = (pairQuotesRef.current[pair] ?? []).slice(-12);
+
+  if (quotes.length < 12) {
+    return {
+      pair,
+      ready: false,
+      confidence: 0,
+      threshold: 100,
+      recommendedDuration: { ticks: rfTickDuration, score: 0, ready: false },
+    };
+  }
+
+  const moves = quotes.slice(1).map((q, i) => q - quotes[i]);
+  const up = moves.filter((m) => m > 0).length;
+  const down = moves.filter((m) => m < 0).length;
+  const flat = moves.filter((m) => m === 0).length;
+  const total = moves.length;
+  const active = up + down;
+  const activity = total > 0 ? active / total : 0;
+  const imbalance = Math.abs(up - down);
+  const moveRange = Math.max(...quotes) - Math.min(...quotes);
+
+  const avgAbsMove = moves.length
+    ? moves.reduce((sum, move) => sum + Math.abs(move), 0) / moves.length
+    : 0;
+
+  const last5Moves = moves.slice(-5);
+  const recentBurst = last5Moves.length
+    ? last5Moves.reduce((sum, move) => sum + Math.abs(move), 0) / last5Moves.length
+    : 0;
+
+  const directionFlips = moves.reduce((count, move, index, arr) => {
+    if (index === 0) return 0;
+    const prev = arr[index - 1];
+    if (move === 0 || prev === 0) return count;
+    return Math.sign(move) !== Math.sign(prev) ? count + 1 : count;
+  }, 0);
+
+  const scoreRows = dualAutoDurationOptions.map((ticks) => {
+    const need = getDualDurationNeed(ticks);
+
+    const fitScore =
+      activity * 28 +
+      Math.min(24, (avgAbsMove / Math.max(need, 0.0001)) * 12) +
+      Math.min(20, (recentBurst / Math.max(need * 0.9, 0.0001)) * 10) +
+      Math.min(18, (moveRange / Math.max(need * Math.max(2, Math.min(ticks, 6)), 0.0001)) * 12) +
+      Math.min(8, directionFlips * 1.2) -
+      Math.min(20, flat * 7) -
+      Math.min(14, imbalance * 2.5);
+
+    return {
+      ticks,
+      score: Math.max(0, Math.min(100, fitScore)),
+      ready:
+        activity >= 0.82 &&
+        flat <= 1 &&
+        avgAbsMove >= need &&
+        recentBurst >= need * 0.85 &&
+        moveRange >= need * Math.max(2, Math.min(ticks, 6)),
+    };
+  });
+
+  const recommendedDuration =
+    scoreRows
+      .slice()
+      .sort((a, b) => {
+        if (a.ready !== b.ready) return Number(b.ready) - Number(a.ready);
+        return b.score - a.score;
+      })[0] ?? { ticks: rfTickDuration, score: 0, ready: false };
+
+  const threshold =
+    recommendedDuration.ticks <= 2
+      ? 88
+      : recommendedDuration.ticks <= 5
+      ? 84
+      : recommendedDuration.ticks <= 10
+      ? 80
+      : 76;
+
+  const need = getDualDurationNeed(recommendedDuration.ticks);
+
+  const confidence = Math.max(
+    0,
+    Math.min(
+      100,
+      activity * 32 +
+        Math.min(22, avgAbsMove * 5000) +
+        Math.min(18, recentBurst * 6000) +
+        Math.min(14, moveRange * 2500) +
+        Math.min(8, directionFlips * 1.5) -
+        Math.min(18, flat * 6) -
+        Math.min(12, imbalance * 2.5)
+    )
+  );
+
+  const ready =
+    confidence >= threshold &&
+    activity >= 0.85 &&
+    flat <= 1 &&
+    avgAbsMove >= need &&
+    recentBurst >= need * 0.9 &&
+    moveRange >= need * Math.max(2, Math.min(recommendedDuration.ticks, 6));
+
+  return {
+    pair,
+    ready,
+    confidence,
+    threshold,
+    recommendedDuration,
+  };
+};
+
+const dualAutoStepCandidates = STEP_ONLY_PAIRS
+  .map((pair) => buildDualAutoMetrics(pair))
+  .sort((a, b) => {
+    if (a.ready !== b.ready) return Number(b.ready) - Number(a.ready);
+    if (b.confidence !== a.confidence) return b.confidence - a.confidence;
+    return b.recommendedDuration.score - a.recommendedDuration.score;
+  });
+
+const bestDualAutoStepCandidate = dualAutoStepCandidates[0] ?? null;
+
+const dualAutoTargetPair =
+  dualAutoScope === "best-step" && bestDualAutoStepCandidate
+    ? bestDualAutoStepCandidate.pair
+    : selectedPair;
+
+const dualAutoExecutionDuration =
+  dualAutoScope === "best-step" && bestDualAutoStepCandidate
+    ? bestDualAutoStepCandidate.recommendedDuration.ticks
+    : recommendedDualDuration.ticks;
+
+const dualAutoExecutionReady =
+  dualAutoScope === "best-step" && bestDualAutoStepCandidate
+    ? bestDualAutoStepCandidate.ready
+    : dualAutoReady;
+
+const dualAutoExecutionConfidence =
+  dualAutoScope === "best-step" && bestDualAutoStepCandidate
+    ? bestDualAutoStepCandidate.confidence
+    : dualAutoConfidence;
+
   const riseFallTrades = tradeHistory.filter((t) => t.type === "Rise" || t.type === "Fall");
 
   const tickBadges = last12Quotes.slice(-8).map((q, i, arr) => {
@@ -4757,10 +5075,8 @@ setRfAllowEquals: React.Dispatch<React.SetStateAction<boolean>>;
     return { value: q, arrow, tone };
   });
 
-  const [rfSelectedAction, setRfSelectedAction] = useState<"Rise" | "Fall" | "Both" | "Auto" | null>(null);
-  const rfSelectedResetRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const triggerRfSelectedAction = (action: "Rise" | "Fall" | "Both" | "Auto") => {
+  const triggerRfSelectedAction = (action: "Rise" | "Fall" | "Both" | "Auto" | "Dual Auto") => {
     setRfSelectedAction(action);
 
     if (rfSelectedResetRef.current) {
@@ -4773,11 +5089,68 @@ setRfAllowEquals: React.Dispatch<React.SetStateAction<boolean>>;
     }, 3000);
   };
 
-  // Cleanup effect for rfSelectedResetRef timer
+  useEffect(() => {
+    if (!dualAutoEnabled) {
+      setDualAutoCooldownLeft(0);
+      if (dualAutoCooldownRef.current) {
+        clearInterval(dualAutoCooldownRef.current);
+        dualAutoCooldownRef.current = null;
+      }
+      return;
+    }
+
+    const updateCooldown = () => {
+      const remaining = Math.max(0, 60000 - (Date.now() - dualAutoLastPlacedRef.current));
+      setDualAutoCooldownLeft(Math.ceil(remaining / 1000));
+    };
+
+    updateCooldown();
+
+    if (!dualAutoCooldownRef.current) {
+      dualAutoCooldownRef.current = setInterval(updateCooldown, 1000);
+    }
+
+    return () => {
+      if (dualAutoCooldownRef.current) {
+        clearInterval(dualAutoCooldownRef.current);
+        dualAutoCooldownRef.current = null;
+      }
+    };
+  }, [dualAutoEnabled]);
+
+  useEffect(() => {
+    if (!dualAutoEnabled || !dualAutoExecutionReady || dualAutoCooldownLeft > 0) return;
+
+    triggerRfSelectedAction("Dual Auto");
+
+    if (dualAutoTargetPair !== selectedPair) {
+      setSelectedPair(dualAutoTargetPair);
+      return;
+    }
+
+    onPlaceDoubleTrade(dualAutoExecutionDuration);
+    dualAutoLastPlacedRef.current = Date.now();
+    setDualAutoCooldownLeft(60);
+  }, [
+    dualAutoEnabled,
+    dualAutoExecutionReady,
+    dualAutoCooldownLeft,
+    dualAutoTargetPair,
+    selectedPair,
+    dualAutoExecutionDuration,
+    onPlaceDoubleTrade,
+    setSelectedPair,
+  ]);
+
+  // Cleanup effect for Rise/Fall timers
   useEffect(() => {
     return () => {
       if (rfSelectedResetRef.current) {
         clearTimeout(rfSelectedResetRef.current);
+      }
+      if (dualAutoCooldownRef.current) {
+        clearInterval(dualAutoCooldownRef.current);
+        dualAutoCooldownRef.current = null;
       }
     };
   }, []);
@@ -4919,6 +5292,22 @@ setRfAllowEquals: React.Dispatch<React.SetStateAction<boolean>>;
                   {recommendedTrade ?? "WAIT"}
                 </p>
               </div>
+
+              <div className="rounded-2xl border border-violet-400/15 bg-violet-500/8 p-4">
+                <p className="text-[11px] uppercase tracking-wide text-white/45">Dual Auto Confidence</p>
+                <p className="mt-2 text-2xl font-bold text-violet-300">
+                  {dualAutoConfidence.toFixed(0)}%
+                </p>
+              </div>
+              <div className="rounded-2xl border border-amber-400/15 bg-amber-500/8 p-4">
+  <p className="text-[11px] uppercase tracking-wide text-white/45">Recommended Dual Duration</p>
+  <p className="mt-2 text-2xl font-bold text-amber-300">
+    {recommendedDualDuration.ticks} ticks
+  </p>
+  <p className="mt-1 text-[11px] text-white/65">
+    Fit score: {recommendedDualDuration.score.toFixed(0)}%
+  </p>
+</div>
             </div>
 
             <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-3">
@@ -5072,6 +5461,55 @@ setRfAllowEquals: React.Dispatch<React.SetStateAction<boolean>>;
                 {rfSelectedAction === "Auto" && recommendedTrade && <span className="ml-2">✓</span>}
               </>
             </button>
+            <div className="w-full rounded-xl border border-white/10 bg-black/20 p-3">
+  <label className="block text-[11px] font-medium uppercase tracking-wide text-white/55 mb-2">
+    Dual Auto Scan Mode
+  </label>
+  <select
+    value={dualAutoScope}
+    onChange={(e) => setDualAutoScope(e.target.value as "selected" | "best-step")}
+    className="w-full rounded-lg border border-white/10 bg-slate-950 px-3 py-2 text-sm text-white outline-none"
+  >
+    <option value="selected">Current selected index</option>
+    <option value="best-step">Scan all Step indexes</option>
+  </select>
+
+  <p className="mt-2 text-[11px] text-white/60">
+    {dualAutoScope === "best-step"
+      ? bestDualAutoStepCandidate
+        ? `Best Step pair now: ${bestDualAutoStepCandidate.pair} • ${bestDualAutoStepCandidate.recommendedDuration.ticks} ticks • ${bestDualAutoStepCandidate.confidence.toFixed(0)}% confidence`
+        : "Scanning Step indexes for the best pair..."
+      : `Using current index: ${selectedPair}`}
+  </p>
+</div>
+            <button
+              type="button"
+              onClick={() => {
+                triggerRfSelectedAction("Dual Auto");
+                setDualAutoEnabled((v) => !v);
+              }}
+              className={`w-full rounded-xl px-4 py-3 text-center font-semibold border transition-all duration-200 ${
+                dualAutoEnabled
+                  ? "border-amber-200 bg-gradient-to-r from-amber-500 to-orange-500 text-white ring-4 ring-amber-300/60 shadow-[0_0_28px_rgba(251,146,60,0.48)]"
+                  : "border-amber-950/80 bg-gradient-to-r from-slate-950 to-amber-950 text-amber-100/90 hover:border-amber-700"
+              }`}
+            >
+              <div className="flex items-center justify-center gap-2">
+                <span>Dual Auto</span>
+                {dualAutoEnabled && <span>✓</span>}
+              </div>
+              <div className="mt-1 text-xs font-medium text-white/80">
+  {dualAutoEnabled
+  ? dualAutoCooldownLeft > 0
+    ? `Cooldown: ${dualAutoCooldownLeft}s • ${dualAutoTargetPair} • ${dualAutoExecutionDuration} ticks queued`
+    : dualAutoExecutionReady
+    ? `Ready • ${dualAutoTargetPair} • ${dualAutoExecutionDuration} ticks`
+    : `Watching • ${dualAutoTargetPair} • best fit ${dualAutoExecutionDuration} ticks`
+  : dualAutoScope === "best-step"
+  ? "Scans all Step indexes and chooses the best pair"
+  : `Places 1 Rise + 1 Fall on ${selectedPair}`}
+</div>
+            </button>
             <button
   type="button"
   aria-pressed={rfAllowEquals}
@@ -5116,9 +5554,12 @@ setRfAllowEquals: React.Dispatch<React.SetStateAction<boolean>>;
           <p className="mt-2 text-[11px] font-medium text-cyan-300/90">
             Selected: {rfSelectedAction ?? "None"}
           </p>
+          <p className="text-[11px] font-medium text-amber-300/90">
+Dual Auto: {dualAutoEnabled ? (dualAutoCooldownLeft > 0 ? `Cooling down (${dualAutoCooldownLeft}s) • ${dualAutoTargetPair} • next ${dualAutoExecutionDuration} ticks` : dualAutoExecutionReady ? `Armed • ${dualAutoTargetPair} • ${dualAutoExecutionDuration} ticks • ${dualAutoExecutionConfidence.toFixed(0)}% confidence` : `Watching market • ${dualAutoTargetPair} • best ${dualAutoExecutionDuration} ticks • ${dualAutoExecutionConfidence.toFixed(0)}%`) : "Off"}
+</p>
           <p className="text-[11px] text-white/50 mt-2">
-            Auto follows the live trend engine. Rise + Fall places both trades at the same time using the same pair, stake, and tick duration. Allow Equals applies to Auto, Rise, Fall, and Rise + Fall.
-          </p>
+  Auto follows the live trend engine. Dual Auto can either use the current selected index or scan all Step indexes and pick the strongest Step pair. It recommends the best duration from 2, 4, 6, 8, or 10 ticks based on live movement quality, then places 1 Rise + 1 Fall together using that pair and duration when confidence is strong enough. After each dual trade it waits 60 seconds before the next entry. Allow Equals applies to Auto, Dual Auto, Rise, Fall, and Rise + Fall.
+</p>
         </div>
 
         <StrategyTradeHistoryTab
