@@ -41,8 +41,8 @@ export const INDEX_GROUPS = {
     { code: "STPRNG", label: "STEP INDEX 100" },
     { code: "STPRNG2", label: "STEP INDEX 200" },
     { code: "STPRNG3", label: "STEP INDEX 300" },
-    { code: "STPRNG4", label: "STEP INDEX 500" },
-    { code: "STPRNG5", label: "STEP INDEX 1000" },
+    { code: "STPRNG4", label: "STEP INDEX 400" },
+    { code: "STPRNG5", label: "STEP INDEX 500" },
   ],
 };
 
@@ -90,6 +90,23 @@ export const STEP_ONLY_PAIRS = RISE_FALL_PAIRS.filter(
 export const PAIRS = RISE_FALL_PAIRS;
 
 export type Pair = (typeof PAIRS)[number];
+
+type ActiveSymbolItem = {
+  symbol: string;
+  display_name?: string;
+  display_name_short?: string;
+};
+
+const STEP_PAIR_LABELS: Record<
+  Extract<Pair, "STPRNG" | "STPRNG2" | "STPRNG3" | "STPRNG4" | "STPRNG5">,
+  string
+> = {
+  STPRNG: "Step Index 100",
+  STPRNG2: "Step Index 200",
+  STPRNG3: "Step Index 300",
+  STPRNG4: "Step Index 400",
+  STPRNG5: "Step Index 500",
+};
 
 type TradeResult = "Win" | "Loss" | "Pending";
 type TradeType =
@@ -1136,10 +1153,16 @@ useEffect(() => {
 }, []);
 
   const wsRef = useRef<WebSocket | null>(null);
-  const authorizedRef = useRef(false);
-  const activeStrategyRef = useRef<"matches" | "overunder" | "risefall" | "mspider" | null>(null);
-  const selectedPairRef = useRef<Pair>(PAIRS[0]);
-  const lastEdshellAtRef = useRef(0);
+const authorizedRef = useRef(false);
+const activeStrategyRef = useRef<"matches" | "overunder" | "risefall" | "mspider" | null>(null);
+const selectedPairRef = useRef<Pair>(PAIRS[0]);
+const liveSymbolMapRef = useRef<Record<Pair, string>>(
+  Object.fromEntries(PAIRS.map((p) => [p, p])) as Record<Pair, string>
+);
+const liveSymbolReverseMapRef = useRef<Record<string, Pair>>(
+  Object.fromEntries(PAIRS.map((p) => [p, p])) as Record<string, Pair>
+);
+const lastEdshellAtRef = useRef(0);
   const [uiFlags, setUiFlags] = useState<UIFlags>(DEFAULT_UI_FLAGS);
   const [barrierOptimizerOpen, setBarrierOptimizerOpen] = useState(false);
 const [barrierOptimizerLive, setBarrierOptimizerLive] = useState(false);
@@ -1205,7 +1228,18 @@ useEffect(() => {
     if (activeStrategyRef.current === "risefall") {
       setTicks(pairDigitsRef.current[selectedPair] ?? []);
     }
-  }, [selectedPair]);
+
+    if (connected && authorizedRef.current) {
+      safeSend({ ticks: resolveLiveSymbol(selectedPair), subscribe: 1 });
+    }
+  }, [selectedPair, connected]);
+
+  useEffect(() => {
+    if (activeStrategy === "risefall" && connected && authorizedRef.current) {
+      safeSend({ ticks: resolveLiveSymbol(selectedPair), subscribe: 1 });
+      setTicks(pairDigitsRef.current[selectedPair] ?? []);
+    }
+  }, [activeStrategy, selectedPair, connected]);
 
   // ===== Live chart quotes (used for the chart panel) =====
   const chartQuotes =
@@ -1294,6 +1328,41 @@ const [pairMeta, setPairMeta] = useState(emptyMeta);
     ws.send(JSON.stringify(payload));
     return true;
   };
+
+  const resolveLiveSymbol = (pair: Pair) => liveSymbolMapRef.current[pair] ?? pair;
+
+const normalizeIncomingPair = (symbol: string): Pair | null => {
+  const mapped = liveSymbolReverseMapRef.current[symbol];
+  if (mapped) return mapped;
+  return PAIRS.includes(symbol as Pair) ? (symbol as Pair) : null;
+};
+
+const syncLiveSymbolMap = (activeSymbols: ActiveSymbolItem[]) => {
+  const nextMap = Object.fromEntries(PAIRS.map((p) => [p, p])) as Record<Pair, string>;
+
+  activeSymbols.forEach((item) => {
+    const label = `${item.display_name ?? ""} ${item.display_name_short ?? ""}`.toLowerCase();
+
+    (Object.entries(STEP_PAIR_LABELS) as Array<
+      [Extract<Pair, "STPRNG" | "STPRNG2" | "STPRNG3" | "STPRNG4" | "STPRNG5">, string]
+    >).forEach(([pair, expectedLabel]) => {
+      const normalizedExpected = expectedLabel.toLowerCase();
+      const looseExpected = normalizedExpected.replace(" index", "");
+      if (
+        label.includes(normalizedExpected) ||
+        label.includes(looseExpected) ||
+        label.includes(normalizedExpected.replace(/\s+/g, ""))
+      ) {
+        nextMap[pair] = item.symbol;
+      }
+    });
+  });
+
+  liveSymbolMapRef.current = nextMap;
+  liveSymbolReverseMapRef.current = Object.fromEntries(
+    Object.entries(nextMap).map(([pair, symbol]) => [symbol, pair as Pair])
+  ) as Record<string, Pair>;
+};
 
   const newReqId = () => Date.now() + Math.floor(Math.random() * 1000);
   // ================= BUY QUEUE (prevents stuck Pending in Turbo) =================
@@ -1394,7 +1463,7 @@ useEffect(() => {
 
   const subscribeAllPairs = (pairs: readonly Pair[]) => {
   pairs.forEach((sym) => {
-    safeSend({ ticks: sym, subscribe: 1 });
+    safeSend({ ticks: resolveLiveSymbol(sym), subscribe: 1 });
   });
 };
 const resetPairNow = (p: Pair) => {
@@ -1503,8 +1572,9 @@ reqInfoRef.current = {};
   const msg: string = data.error.message;
   const req_id: number | undefined = data.req_id;
   const echo = data.echo_req ?? {};
-  const tickSymbol = typeof echo.ticks === "string" ? echo.ticks : null;
-  const isStepOnlySymbol = !!tickSymbol && STEP_ONLY_PAIRS.includes(tickSymbol as Pair);
+  const rawTickSymbol = typeof echo.ticks === "string" ? echo.ticks : null;
+const mappedTickPair = rawTickSymbol ? normalizeIncomingPair(rawTickSymbol) : null;
+const isStepOnlySymbol = !!mappedTickPair && STEP_ONLY_PAIRS.includes(mappedTickPair);
   const isInvalidSymbolError = /symbol .* invalid/i.test(msg);
   const isAlreadySubscribedError = /already subscribed/i.test(msg);
 
@@ -1517,26 +1587,31 @@ reqInfoRef.current = {};
   // Turbo: do NOT alert (but we did reject waiters so queue doesn't hang)
   if (req_id && reqInfoRef.current[req_id]?.turbo) return;
 
-  // Ignore popup alerts for invalid Step-index subscriptions
-if (isInvalidSymbolError && isStepOnlySymbol) return;
+  // Ignore duplicate/harmless subscription popups, but do not silently swallow real Step subscription failures
+if (isInvalidSymbolError && isStepOnlySymbol) {
+  console.warn(`Step index subscription failed for ${rawTickSymbol}: ${msg}`);
+  setAnalysisStatus(`Step index feed failed for ${mappedTickPair}. Refreshing live symbol map...`);
+  safeSend({ active_symbols: "brief", product_type: "basic" });
+  return;
+}
 
-// Ignore harmless duplicate tick subscriptions (R_10 already subscribed)
-if (isAlreadySubscribedError && tickSymbol) return;
+if (isAlreadySubscribedError && rawTickSymbol) return;
 
 alert(msg);
 return;
 }
 
-      if (data.msg_type === "authorize") {
+if (data.msg_type === "active_symbols" && Array.isArray(data.active_symbols)) {
+  syncLiveSymbolMap(data.active_symbols as ActiveSymbolItem[]);
+}
+
+     if (data.msg_type === "authorize") {
   authorizedRef.current = true;
   setConnected(true);
 
   safeSend({ balance: 1, subscribe: 1 });
-  subscribeAllPairs(METRO_SPIDER_PAIRS);
-
-  STEP_ONLY_PAIRS.forEach((pair) => {
-    safeSend({ ticks: pair, subscribe: 1 });
-  });
+  safeSend({ active_symbols: "brief", product_type: "basic" });
+  subscribeAllPairs(PAIRS);
 }
 
       if (data.msg_type === "balance") {
@@ -1545,8 +1620,8 @@ return;
       }
 
       if (data.msg_type === "tick" && data.tick?.quote !== undefined) {
-  const symbol = data.tick.symbol as Pair;
-  if (!PAIRS.includes(symbol)) return;
+  const symbol = normalizeIncomingPair(String(data.tick.symbol));
+if (!symbol) return;
 
  // ✅ allow ticks if ANY strategy is open OR Metro auto is running
 if (
@@ -1750,17 +1825,17 @@ const placeHigherLowerTrade = ({
 
   const parsedDuration = parseMSpiderDuration(String(durationValue));
 
-const trade: Trade = {
-  id: req_id,
-  symbol: selectedPair,
-  digit: 0,
-  type: direction,
-  stake: tradeStake,
-  durationTicks: parsedDuration.duration_unit === "t" ? parsedDuration.duration : 0,
-  result: "Pending",
-  createdAt: Date.now(),
-  source: "M-Spider",
-};
+  const trade: Trade = {
+    id: req_id,
+    symbol: selectedPair,
+    digit: 0,
+    type: direction,
+    stake: tradeStake,
+    durationTicks: parsedDuration.duration_unit === "t" ? parsedDuration.duration : 0,
+    result: "Pending",
+    createdAt: Date.now(),
+    source: "M-Spider",
+  };
 
   setTradeHistory((prev) => [trade, ...prev]);
 
@@ -1773,18 +1848,18 @@ const trade: Trade = {
 
   const { duration, duration_unit } = parseMSpiderDuration(String(durationValue));
 
-safeSend({
-  proposal: 1,
-  amount: tradeStake,
-  basis: "stake",
-  contract_type: getContractType(direction, false),
-  currency: currency || "USD",
-  symbol: selectedPair,
-  duration,
-  duration_unit,
-  barrier: String(barrier),
-  req_id,
-});
+  safeSend({
+    proposal: 1,
+    amount: tradeStake,
+    basis: "stake",
+    contract_type: getContractType(direction, false),
+    currency: currency || "USD",
+    symbol: resolveLiveSymbol(selectedPair),
+    duration,
+    duration_unit,
+    barrier: String(barrier),
+    req_id,
+  });
 };
 const requestHigherLowerPreview = async ({
   direction,
@@ -1817,7 +1892,7 @@ const requestHigherLowerPreview = async ({
       basis: "stake",
       contract_type: getContractType(direction, false),
       currency: currency || "USD",
-      symbol: selectedPair,
+      symbol: resolveLiveSymbol(selectedPair),
       duration,
       duration_unit,
       barrier: String(barrier),
@@ -1886,7 +1961,7 @@ const placeTrade = (type: TradeType, durationTicks: number) => {
     basis: "stake",
     contract_type: getContractType(type, rfAllowEquals),
     currency: currency || "USD",
-    symbol: selectedPair,
+    symbol: resolveLiveSymbol(selectedPair),
     duration: durationTicks,
     duration_unit: "t",
     req_id,
@@ -1940,7 +2015,7 @@ const placeDiffersInstant = async (
       createdAt: Date.now(),
       source, 
       batchIndex: opts?.batchTotal ? startIndex + i : undefined,
-batchTotal: opts?.batchTotal,                // ✅ FIX: label the trade source
+      batchTotal: opts?.batchTotal,                // ✅ FIX: label the trade source
     };
 
     setTradeHistory((prev: Trade[]) => [trade, ...prev]);
@@ -1959,7 +2034,7 @@ batchTotal: opts?.batchTotal,                // ✅ FIX: label the trade source
       basis: "stake",
       contract_type: CONTRACT_TYPE_MAP["Differs"],
       currency: currency || "USD",
-      symbol,
+      symbol: resolveLiveSymbol(symbol),
       duration: durationTicks,  // ✅ FIX: duration matches what's stored
       duration_unit: "t",
       barrier: String(digit),
@@ -1990,7 +2065,7 @@ batchTotal: opts?.batchTotal,                // ✅ FIX: label the trade source
       result: "Pending",
       createdAt: Date.now(),
       batchIndex: batch?.index,
-batchTotal: batch?.total,
+      batchTotal: batch?.total,
     };
 
     setTradeHistory((prev: Trade[]) => [trade, ...prev]);
@@ -2009,7 +2084,7 @@ batchTotal: batch?.total,
       basis: "stake",
       contract_type: CONTRACT_TYPE_MAP["Differs"],
       currency: currency || "USD",
-      symbol,
+      symbol: resolveLiveSymbol(symbol),
       duration: mdTickDuration,
       duration_unit: "t",
       barrier: String(digit),
@@ -2649,7 +2724,7 @@ const toggleSpiderRandomAuto = async () => {
     });
     setTicks(pairQuotesRef.current[selectedPair] ?? []);
   } else {
-    safeSend({ ticks: selectedPair, subscribe: 1 });
+    safeSend({ ticks: resolveLiveSymbol(selectedPair), subscribe: 1 });
     setTicks(pairQuotesRef.current[selectedPair] ?? []);
   }
 }, [activeStrategy, connected, selectedPair]);
@@ -3071,11 +3146,17 @@ requestHigherLowerPreview: (args: {
   const [lowerStake, setLowerStake] = useState<number>(stake);
   const [autoTradingEnabled, setAutoTradingEnabled] = useState(false);
   const [autoTradeMinConfidence, setAutoTradeMinConfidence] = useState<number>(60);
+  const [autoTradeMode, setAutoTradeMode] = useState<"both" | "higher" | "lower">("both");
+  const [autoTradeNow, setAutoTradeNow] = useState(() => Date.now());
   const autoTradeLastAtRef = useRef<number>(0);
+  const requestPreviewRef = useRef(requestHigherLowerPreview);
+  const previewLastFetchedAtRef = useRef<number>(0);
   const [barrierMode, setBarrierMode] = useState<"offset" | "absolute">("offset");
   const [halfBarrier, setHalfBarrier] = useState(false);
   const [higherBarrier, setHigherBarrier] = useState<string>("+0.12");
   const [lowerBarrier, setLowerBarrier] = useState<string>("+0.12");
+  const [selectedTradeAction, setSelectedTradeAction] = useState<"higher" | "lower" | "both" | null>(null);
+  const selectedTradeActionTimeoutRef = useRef<number | null>(null);
 
   const durationOptions = [
     
@@ -3223,6 +3304,8 @@ const [lowerPreview, setLowerPreview] = useState<{ payout: number; profit: numbe
 });
 
 const combinedStake = Number((stake + lowerStake).toFixed(2));
+const selectedDurationLabel =
+  durationOptions.find((opt) => opt.value === duration)?.label ?? `${duration} Ticks`;
 const higherPayout = Number(higherPreview.payout.toFixed(2));
 const lowerPayout = Number(lowerPreview.payout.toFixed(2));
 const higherProfit = Number(higherPreview.profit.toFixed(2));
@@ -3230,9 +3313,52 @@ const lowerProfit = Number(lowerPreview.profit.toFixed(2));
 const combinedPayout = Number((higherPayout + lowerPayout).toFixed(2));
 const confidence = Math.max(higherPct, lowerPct);
 const autoTradeCooldownMs = 30_000;
+const autoTradeCooldownRemainingMs = Math.max(
+  0,
+  autoTradeCooldownMs - (autoTradeNow - autoTradeLastAtRef.current)
+);
+const autoTradeCooldownSeconds = Math.ceil(autoTradeCooldownRemainingMs / 1000);
+const autoTradeCoolingDown = autoTradingEnabled && autoTradeLastAtRef.current > 0 && autoTradeCooldownRemainingMs > 0;
+const flashSelectedTradeAction = (action: "higher" | "lower" | "both") => {
+  setSelectedTradeAction(action);
+
+  if (selectedTradeActionTimeoutRef.current) {
+    window.clearTimeout(selectedTradeActionTimeoutRef.current);
+  }
+
+  selectedTradeActionTimeoutRef.current = window.setTimeout(() => {
+    setSelectedTradeAction(null);
+    selectedTradeActionTimeoutRef.current = null;
+  }, 3000);
+};
 const autoTradeReady =
   confidence >= autoTradeMinConfidence &&
   Date.now() - autoTradeLastAtRef.current >= autoTradeCooldownMs;
+
+useEffect(() => {
+  requestPreviewRef.current = requestHigherLowerPreview;
+}, [requestHigherLowerPreview]);
+
+useEffect(() => {
+  if (!autoTradingEnabled) {
+    setAutoTradeNow(Date.now());
+    return;
+  }
+
+  const tick = () => setAutoTradeNow(Date.now());
+  tick();
+
+  const interval = window.setInterval(tick, 1000);
+  return () => window.clearInterval(interval);
+}, [autoTradingEnabled, autoTradeLastAtRef.current]);
+
+useEffect(() => {
+  return () => {
+    if (selectedTradeActionTimeoutRef.current) {
+      window.clearTimeout(selectedTradeActionTimeoutRef.current);
+    }
+  };
+}, []);
 
 useEffect(() => {
   let cancelled = false;
@@ -3246,15 +3372,19 @@ useEffect(() => {
       return;
     }
 
+    const now = Date.now();
+    if (now - previewLastFetchedAtRef.current < 1200) return;
+    previewLastFetchedAtRef.current = now;
+
     try {
       const [higher, lower] = await Promise.all([
-        requestHigherLowerPreview({
+        requestPreviewRef.current({
           direction: "Higher",
           durationValue: duration,
           barrier: higherDisplay,
           customStake: stake,
         }),
-        requestHigherLowerPreview({
+        requestPreviewRef.current({
           direction: "Lower",
           durationValue: duration,
           barrier: lowerDisplay,
@@ -3274,13 +3404,13 @@ useEffect(() => {
     }
   };
 
-  const t = window.setTimeout(run, 180);
+  const t = window.setTimeout(run, 350);
 
   return () => {
     cancelled = true;
     window.clearTimeout(t);
   };
-}, [requestHigherLowerPreview, duration, higherDisplay, lowerDisplay, stake, lowerStake, selectedPair]);
+}, [duration, higherDisplay, lowerDisplay, stake, lowerStake, selectedPair]);
 const zoneLabel =
   latestQuote > higherBarrierValue
     ? "Above Higher"
@@ -3304,32 +3434,44 @@ const latestY = 100 - ((latestQuote - chartMin) / chartRange) * 100;
 const higherY = 100 - ((higherBarrierValue - chartMin) / chartRange) * 100;
 const lowerY = 100 - ((lowerBarrierValue - chartMin) / chartRange) * 100;
 const clampY = (y: number) => Math.max(6, Math.min(94, y));
-const higherLabelY = clampY(higherY - 3);
-const lowerLabelY = clampY(lowerY - 3);
-const latestLabelY = clampY(latestY - 3);
+const higherBandTop = Math.max(0, higherY - 2.3);
+const higherBandHeight = Math.min(100 - higherBandTop, 4.6);
+const lowerBandTop = Math.max(0, lowerY - 2.3);
+const lowerBandHeight = Math.min(100 - lowerBandTop, 4.6);
+const latestBandTop = Math.max(0, latestY - 1.4);
+const latestBandHeight = Math.min(100 - latestBandTop, 2.8);
+const higherLabelY = clampY(higherY - 4.4);
+const lowerLabelY = clampY(lowerY + 6.4);
+const latestLabelY = clampY(latestY - 3.8);
 
 useEffect(() => {
   if (!autoTradingEnabled) return;
   if (!autoTradeReady) return;
 
   autoTradeLastAtRef.current = Date.now();
+  setAutoTradeNow(Date.now());
 
-  onPlaceHigherLowerTrade({
-  direction: "Higher",
-  durationValue: duration,
-  barrier: higherDisplay,
-  customStake: stake,
-});
+  if (autoTradeMode === "both" || autoTradeMode === "higher") {
+    onPlaceHigherLowerTrade({
+      direction: "Higher",
+      durationValue: duration,
+      barrier: higherDisplay,
+      customStake: stake,
+    });
+  }
 
-onPlaceHigherLowerTrade({
-  direction: "Lower",
-  durationValue: duration,
-  barrier: lowerDisplay,
-  customStake: lowerStake,
-});
+  if (autoTradeMode === "both" || autoTradeMode === "lower") {
+    onPlaceHigherLowerTrade({
+      direction: "Lower",
+      durationValue: duration,
+      barrier: lowerDisplay,
+      customStake: lowerStake,
+    });
+  }
 }, [
   autoTradingEnabled,
   autoTradeReady,
+  autoTradeMode,
   autoTradeMinConfidence,
   higherDisplay,
   lowerDisplay,
@@ -3929,6 +4071,18 @@ onPlaceHigherLowerTrade({
               <stop offset="0%" stopColor="rgba(255,66,99,0.18)" />
               <stop offset="100%" stopColor="rgba(255,66,99,0.02)" />
             </linearGradient>
+            <linearGradient id="mspiderHigherBand" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor="rgba(16,185,129,0.20)" />
+              <stop offset="100%" stopColor="rgba(16,185,129,0.06)" />
+            </linearGradient>
+            <linearGradient id="mspiderLowerBand" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor="rgba(244,63,94,0.22)" />
+              <stop offset="100%" stopColor="rgba(244,63,94,0.06)" />
+            </linearGradient>
+            <linearGradient id="mspiderLatestBand" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor="rgba(56,189,248,0.18)" />
+              <stop offset="100%" stopColor="rgba(56,189,248,0.04)" />
+            </linearGradient>
           </defs>
 
           {[20, 40, 60, 80].map((y) => (
@@ -3944,68 +4098,93 @@ onPlaceHigherLowerTrade({
             />
           ))}
 
+          <rect
+            x="0"
+            y={higherBandTop}
+            width="100"
+            height={higherBandHeight}
+            fill="url(#mspiderHigherBand)"
+          />
+          <rect
+            x="0"
+            y={lowerBandTop}
+            width="100"
+            height={lowerBandHeight}
+            fill="url(#mspiderLowerBand)"
+          />
+          <rect
+            x="0"
+            y={latestBandTop}
+            width="100"
+            height={latestBandHeight}
+            fill="url(#mspiderLatestBand)"
+          />
+
           <line
             x1="0"
             y1={higherY}
             x2="100"
             y2={higherY}
-            stroke="rgba(52,211,153,0.9)"
-            strokeDasharray="3 2"
+            stroke="#34d399"
+            strokeWidth="1.4"
+            strokeDasharray="5 2"
             vectorEffect="non-scaling-stroke"
           />
           <g>
-  <rect
-    x="0.8"
-    y={higherLabelY - 5}
-    width="22"
-    height="7"
-    rx="1.6"
-    fill="rgba(16,185,129,0.16)"
-    stroke="rgba(52,211,153,0.55)"
-    strokeWidth="0.3"
-    vectorEffect="non-scaling-stroke"
-  />
-  <text
-    x="1.9"
-    y={higherLabelY}
-    fill="#34d399"
-    fontSize="3.1"
-    fontWeight="700"
-  >
-    HIGHER {higherBarrierValue.toFixed(pip)}
-  </text>
-</g>
+            <rect
+              x="1"
+              y={higherLabelY - 5.8}
+              width="28"
+              height="8.4"
+              rx="1.9"
+              fill="rgba(6,78,59,0.88)"
+              stroke="rgba(52,211,153,0.95)"
+              strokeWidth="0.45"
+              vectorEffect="non-scaling-stroke"
+            />
+            <text
+              x="2.2"
+              y={higherLabelY}
+              fill="#6ee7b7"
+              fontSize="3.35"
+              fontWeight="800"
+            >
+              HIGHER {higherBarrierValue.toFixed(pip)}
+            </text>
+          </g>
+
           <line
             x1="0"
             y1={lowerY}
             x2="100"
             y2={lowerY}
-            stroke="rgba(251,113,133,0.9)"
-            strokeDasharray="3 2"
+            stroke="#fb7185"
+            strokeWidth="1.4"
+            strokeDasharray="5 2"
             vectorEffect="non-scaling-stroke"
           />
           <g>
-  <rect
-    x="77"
-    y={lowerLabelY - 5}
-    width="22"
-    height="7"
-    rx="1.6"
-    fill="rgba(244,63,94,0.16)"
-    stroke="rgba(251,113,133,0.55)"
-    strokeWidth="0.3"
-    vectorEffect="non-scaling-stroke"
-  />
-  <text
-    x="78.2"
-    y={lowerLabelY}
-    fill="#fb7185"
-    fontSize="3.1"
-    fontWeight="700"
-  >
-    LOWER {lowerBarrierValue.toFixed(pip)}
-  </text>
-</g>
+            <rect
+              x="70"
+              y={lowerLabelY - 5.8}
+              width="29"
+              height="8.4"
+              rx="1.9"
+              fill="rgba(127,29,29,0.88)"
+              stroke="rgba(251,113,133,0.95)"
+              strokeWidth="0.45"
+              vectorEffect="non-scaling-stroke"
+            />
+            <text
+              x="71.2"
+              y={lowerLabelY}
+              fill="#fda4af"
+              fontSize="3.35"
+              fontWeight="800"
+            >
+              LOWER {lowerBarrierValue.toFixed(pip)}
+            </text>
+          </g>
 
           {pathD && (
             <>
@@ -4024,24 +4203,24 @@ onPlaceHigherLowerTrade({
   <>
     <g>
       <rect
-        x="0.8"
-        y={latestLabelY - 5}
-        width="18"
-        height="7"
-        rx="1.6"
-        fill="rgba(244,63,94,0.16)"
-        stroke="rgba(251,113,133,0.55)"
-        strokeWidth="0.3"
+        x="1"
+        y={latestLabelY - 5.2}
+        width="20"
+        height="7.6"
+        rx="1.8"
+        fill="rgba(8,47,73,0.88)"
+        stroke="rgba(56,189,248,0.9)"
+        strokeWidth="0.4"
         vectorEffect="non-scaling-stroke"
       />
       <text
-        x="1.9"
+        x="2.2"
         y={latestLabelY}
-        fill="#fb7185"
-        fontSize="3.1"
-        fontWeight="700"
+        fill="#67e8f9"
+        fontSize="3.2"
+        fontWeight="800"
       >
-        {latestQuote.toFixed(pip)}
+        PRICE {latestQuote.toFixed(pip)}
       </text>
     </g>
     <circle
@@ -4060,14 +4239,14 @@ onPlaceHigherLowerTrade({
 
       <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-white/5 pt-4">
         <div className="flex flex-wrap items-center gap-6 text-[1.05rem]">
-          <span className="text-white/80">
-            <span className="mr-2 text-rose-300">—</span>Price
+          <span className="text-cyan-200">
+            <span className="mr-2 text-cyan-300">▭</span>Current Price Band
           </span>
           <span className="text-emerald-300">
-            <span className="mr-2">- -</span>Higher Barrier
+            <span className="mr-2 text-emerald-300">▭</span>Higher Barrier Zone
           </span>
           <span className="text-rose-300">
-            <span className="mr-2">- -</span>Lower Barrier
+            <span className="mr-2 text-rose-300">▭</span>Lower Barrier Zone
           </span>
         </div>
 
@@ -4203,15 +4382,20 @@ onPlaceHigherLowerTrade({
 <div className="mt-6 grid grid-cols-1 gap-4 md:grid-cols-2">
   <button
     type="button"
-    onClick={() =>
-  onPlaceHigherLowerTrade({
-  direction: "Higher",
-  durationValue: duration,
-  barrier: higherDisplay,
-  customStake: stake,
-})
-}
-    className="rounded-[22px] border border-emerald-400/30 bg-[linear-gradient(135deg,rgba(16,185,129,0.22),rgba(6,95,70,0.42))] px-6 py-5 text-left transition hover:border-emerald-300/50 hover:bg-[linear-gradient(135deg,rgba(16,185,129,0.28),rgba(6,95,70,0.5))]"
+    onClick={() => {
+      flashSelectedTradeAction("higher");
+      onPlaceHigherLowerTrade({
+        direction: "Higher",
+        durationValue: duration,
+        barrier: higherDisplay,
+        customStake: stake,
+      });
+    }}
+    className={`rounded-[22px] border px-6 py-5 text-left transition ${
+      selectedTradeAction === "higher"
+        ? "border-emerald-300/70 bg-[linear-gradient(135deg,rgba(6,78,59,0.96),rgba(4,47,46,0.96))] shadow-[0_0_0_1px_rgba(52,211,153,0.28),0_0_26px_rgba(16,185,129,0.20)]"
+        : "border-emerald-900/70 bg-[linear-gradient(135deg,rgba(3,44,44,0.96),rgba(5,24,39,0.98))] hover:border-emerald-400/45 hover:bg-[linear-gradient(135deg,rgba(5,57,51,0.98),rgba(7,31,48,0.98))]"
+    }`}
   >
     <div className="text-[1.2rem] font-bold tracking-wide text-white/80">HIGHER</div>
     <div className="mt-2 text-[1.1rem] text-white/65">Payout: ${higherPayout.toFixed(2)}</div>
@@ -4220,15 +4404,20 @@ onPlaceHigherLowerTrade({
 
   <button
     type="button"
-    onClick={() =>
-  onPlaceHigherLowerTrade({
-  direction: "Lower",
-  durationValue: duration,
-  barrier: lowerDisplay,
-  customStake: lowerStake,
-})
-}
-    className="rounded-[22px] border border-rose-400/30 bg-[linear-gradient(135deg,rgba(244,63,94,0.22),rgba(127,29,29,0.42))] px-6 py-5 text-left transition hover:border-rose-300/50 hover:bg-[linear-gradient(135deg,rgba(244,63,94,0.28),rgba(127,29,29,0.5))]"
+    onClick={() => {
+      flashSelectedTradeAction("lower");
+      onPlaceHigherLowerTrade({
+        direction: "Lower",
+        durationValue: duration,
+        barrier: lowerDisplay,
+        customStake: lowerStake,
+      });
+    }}
+    className={`rounded-[22px] border px-6 py-5 text-left transition ${
+      selectedTradeAction === "lower"
+        ? "border-rose-300/70 bg-[linear-gradient(135deg,rgba(88,28,45,0.96),rgba(76,5,25,0.96))] shadow-[0_0_0_1px_rgba(251,113,133,0.28),0_0_26px_rgba(244,63,94,0.20)]"
+        : "border-rose-950/70 bg-[linear-gradient(135deg,rgba(54,18,31,0.96),rgba(24,10,25,0.98))] hover:border-rose-400/45 hover:bg-[linear-gradient(135deg,rgba(72,22,39,0.98),rgba(36,10,29,0.98))]"
+    }`}
   >
     <div className="text-[1.2rem] font-bold tracking-wide text-white/80">LOWER</div>
     <div className="mt-2 text-[1.1rem] text-white/65">Payout: ${lowerPayout.toFixed(2)}</div>
@@ -4239,21 +4428,26 @@ onPlaceHigherLowerTrade({
 <button
   type="button"
   onClick={() => {
-  onPlaceHigherLowerTrade({
-  direction: "Higher",
-  durationValue: duration,
-  barrier: higherDisplay,
-  customStake: stake,
-});
+    flashSelectedTradeAction("both");
+    onPlaceHigherLowerTrade({
+      direction: "Higher",
+      durationValue: duration,
+      barrier: higherDisplay,
+      customStake: stake,
+    });
 
-onPlaceHigherLowerTrade({
-  direction: "Lower",
-  durationValue: duration,
-  barrier: lowerDisplay,
-  customStake: lowerStake,
-});
-}}
-  className="mt-4 w-full rounded-[22px] border border-amber-400/30 bg-[linear-gradient(135deg,rgba(251,146,60,0.22),rgba(194,65,12,0.42))] px-6 py-6 text-center transition hover:border-amber-300/50 hover:bg-[linear-gradient(135deg,rgba(251,146,60,0.28),rgba(194,65,12,0.5))]"
+    onPlaceHigherLowerTrade({
+      direction: "Lower",
+      durationValue: duration,
+      barrier: lowerDisplay,
+      customStake: lowerStake,
+    });
+  }}
+  className={`mt-4 w-full rounded-[22px] border px-6 py-6 text-center transition ${
+    selectedTradeAction === "both"
+      ? "border-amber-300/70 bg-[linear-gradient(135deg,rgba(120,53,15,0.96),rgba(127,29,29,0.96))] shadow-[0_0_0_1px_rgba(251,191,36,0.25),0_0_28px_rgba(251,146,60,0.22)]"
+      : "border-amber-950/70 bg-[linear-gradient(135deg,rgba(66,32,14,0.96),rgba(57,20,20,0.98))] hover:border-amber-400/45 hover:bg-[linear-gradient(135deg,rgba(84,41,16,0.98),rgba(77,24,24,0.98))]"
+  }`}
 >
   <div className="text-[1.2rem] font-bold tracking-wide text-white/80">HIGHER & LOWER</div>
   <div className="mt-3 text-[1.15rem] text-white/60">
@@ -4283,9 +4477,38 @@ onPlaceHigherLowerTrade({
   <div className="mt-5 flex flex-wrap items-center gap-2">
     <button
       type="button"
-      className="rounded-xl border border-cyan-400/35 bg-sky-500/20 px-5 py-2.5 text-[1.05rem] font-medium text-cyan-200 transition"
+      onClick={() => setAutoTradeMode("both")}
+      className={`rounded-xl border px-5 py-2.5 text-[1.05rem] font-medium transition ${
+        autoTradeMode === "both"
+          ? "border-cyan-400/35 bg-sky-500/20 text-cyan-200"
+          : "border-white/10 bg-slate-800/55 text-white/40"
+      }`}
     >
       H&L (2)
+    </button>
+
+    <button
+      type="button"
+      onClick={() => setAutoTradeMode("higher")}
+      className={`rounded-xl border px-5 py-2.5 text-[1.05rem] font-medium transition ${
+        autoTradeMode === "higher"
+          ? "border-emerald-400/35 bg-emerald-500/18 text-emerald-200"
+          : "border-white/10 bg-slate-800/55 text-white/40"
+      }`}
+    >
+      H
+    </button>
+
+    <button
+      type="button"
+      onClick={() => setAutoTradeMode("lower")}
+      className={`rounded-xl border px-5 py-2.5 text-[1.05rem] font-medium transition ${
+        autoTradeMode === "lower"
+          ? "border-rose-400/35 bg-rose-500/18 text-rose-200"
+          : "border-white/10 bg-slate-800/55 text-white/40"
+      }`}
+    >
+      L
     </button>
 
     <span className="ml-2 text-[1.05rem] text-white/45">Min:</span>
@@ -4307,19 +4530,33 @@ onPlaceHigherLowerTrade({
   </div>
 
   <div className="mt-5 space-y-3">
-  <p className="max-w-4xl text-[1.1rem] leading-9 text-white/45">
-    When enabled, Auto Trading places 1 Higher and 1 Lower trade together on 5 ticks whenever prediction confidence reaches the selected threshold, then waits 30 seconds before the next round.
-  </p>
+    <p className="max-w-4xl text-[1.1rem] leading-9 text-white/45">
+      When enabled, Auto Trading places {autoTradeMode === "both" ? "1 Higher and 1 Lower trade together" : autoTradeMode === "higher" ? "1 Higher trade" : "1 Lower trade"} using the selected duration of {selectedDurationLabel} and the current stake amount
+      {autoTradeMode === "both"
+        ? `s of $${stake.toFixed(2)} for Higher and $${lowerStake.toFixed(2)} for Lower`
+        : autoTradeMode === "higher"
+        ? ` of $${stake.toFixed(2)} for Higher`
+        : ` of $${lowerStake.toFixed(2)} for Lower`}
+      whenever prediction confidence reaches the selected threshold, then waits 30 seconds before the next round.
+    </p>
 
-  <div className="text-[1rem] text-white/55">
-    Status:{" "}
-    <span className={autoTradeReady ? "text-emerald-300" : "text-amber-300"}>
-      {autoTradeReady
-        ? `Ready to place H&L at ${autoTradeMinConfidence}%+ confidence`
-        : `Waiting for ${autoTradeMinConfidence}% confidence or cooldown`}
-    </span>
+    <div className="text-[1rem] text-white/55">
+      Status:{" "}
+      <span className={autoTradeReady ? "text-emerald-300" : "text-amber-300"}>
+        {autoTradeReady
+          ? `Ready to place ${autoTradeMode === "both" ? "H&L" : autoTradeMode === "higher" ? "H" : "L"} on ${selectedDurationLabel}`
+          : `Waiting for ${autoTradeMinConfidence}% confidence or cooldown`}
+      </span>
+    </div>
+    {autoTradeCoolingDown && (
+      <div className="text-[0.98rem] text-cyan-300">
+        Cooldown: next auto trade in {autoTradeCooldownSeconds}s
+      </div>
+    )}
+    <div className="text-[0.98rem] text-white/40">
+      Auto trade setup: Duration {selectedDurationLabel} • Higher stake ${stake.toFixed(2)} • Lower stake ${lowerStake.toFixed(2)}
+    </div>
   </div>
-</div>
 </div>
       <div className="mt-6">
         <StrategyTradeHistoryTab
@@ -4672,14 +4909,14 @@ function RiseFallPanel({
 }: {
   selectedPair: Pair;
   availablePairs: readonly Pair[];
-setSelectedPair: (p: Pair) => void;
-stake: number;
-setStake: (n: number) => void;
-rfTickDuration: number;
-setRfTickDuration: (n: number) => void;
-rfAllowEquals: boolean;
-setRfAllowEquals: React.Dispatch<React.SetStateAction<boolean>>;
-    onPlaceTrade: (type: "Rise" | "Fall", duration: number) => void;
+  setSelectedPair: (p: Pair) => void;
+  stake: number;
+  setStake: (n: number) => void;
+  rfTickDuration: number;
+  setRfTickDuration: (n: number) => void;
+  rfAllowEquals: boolean;
+  setRfAllowEquals: React.Dispatch<React.SetStateAction<boolean>>;
+  onPlaceTrade: (type: "Rise" | "Fall", duration: number) => void;
   onPlaceDoubleTrade: (duration: number) => void;
   currency: string;
   tradeHistory: Trade[];
@@ -4728,6 +4965,263 @@ setRfAllowEquals: React.Dispatch<React.SetStateAction<boolean>>;
       ? "Fall"
       : null;
 
+  const [rfSelectedAction, setRfSelectedAction] = useState<"Rise" | "Fall" | "Both" | "Auto" | "Dual Auto" | null>(null);
+  const rfSelectedResetRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [dualAutoEnabled, setDualAutoEnabled] = useState(false);
+  const dualAutoCooldownRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const dualAutoLastPlacedRef = useRef(0);
+  const [dualAutoCooldownLeft, setDualAutoCooldownLeft] = useState(0);
+  const [dualAutoScope, setDualAutoScope] = useState<"selected" | "best-step">("selected");
+
+  // Dual Auto confidence/cooldown logic
+  const totalTicks = tickMoves.length;
+const activeTicks = upTicks + downTicks;
+const activityRatio = totalTicks > 0 ? activeTicks / totalTicks : 0;
+const imbalance = Math.abs(upTicks - downTicks);
+const moveRange = last12Quotes.length
+  ? Math.max(...last12Quotes) - Math.min(...last12Quotes)
+  : 0;
+
+const avgAbsMove = tickMoves.length
+  ? tickMoves.reduce((sum, move) => sum + Math.abs(move), 0) / tickMoves.length
+  : 0;
+
+const last5Moves = tickMoves.slice(-5);
+const recentBurst = last5Moves.length
+  ? last5Moves.reduce((sum, move) => sum + Math.abs(move), 0) / last5Moves.length
+  : 0;
+
+const directionFlips = tickMoves.reduce((count, move, index, arr) => {
+  if (index === 0) return 0;
+  const prev = arr[index - 1];
+  if (move === 0 || prev === 0) return count;
+  return Math.sign(move) !== Math.sign(prev) ? count + 1 : count;
+}, 0);
+
+const durationVolatilityNeed =
+  rfTickDuration <= 2
+    ? 0.12
+    : rfTickDuration <= 5
+    ? 0.09
+    : rfTickDuration <= 10
+    ? 0.06
+    : 0.04;
+
+const dualAutoConfidence = Math.max(
+  0,
+  Math.min(
+    100,
+    activityRatio * 32 +
+      Math.min(22, avgAbsMove * 5000) +
+      Math.min(18, recentBurst * 6000) +
+      Math.min(14, moveRange * 2500) +
+      Math.min(8, directionFlips * 1.5) -
+      Math.min(18, flatTicks * 6) -
+      Math.min(12, imbalance * 2.5)
+  )
+);
+
+const dualAutoThreshold =
+  rfTickDuration <= 2
+    ? 88
+    : rfTickDuration <= 5
+    ? 84
+    : rfTickDuration <= 10
+    ? 80
+    : 76;
+
+const dualAutoReady =
+  last12Quotes.length >= 12 &&
+  latestQuote !== null &&
+  dualAutoConfidence >= dualAutoThreshold &&
+  activityRatio >= 0.85 &&
+  flatTicks <= 1 &&
+  avgAbsMove >= durationVolatilityNeed &&
+  recentBurst >= durationVolatilityNeed * 0.9 &&
+  moveRange >= durationVolatilityNeed * Math.max(2, Math.min(rfTickDuration, 6));
+
+  const dualAutoDurationOptions = [2, 4, 6, 8, 10] as const;
+
+const getDualDurationNeed = (ticks: number) =>
+  ticks <= 2 ? 0.12 : ticks <= 4 ? 0.095 : ticks <= 6 ? 0.075 : ticks <= 8 ? 0.055 : 0.04;
+
+const dualAutoDurationScores = dualAutoDurationOptions.map((ticks) => {
+  const need = getDualDurationNeed(ticks);
+
+  const fitScore =
+    activityRatio * 28 +
+    Math.min(24, (avgAbsMove / Math.max(need, 0.0001)) * 12) +
+    Math.min(20, (recentBurst / Math.max(need * 0.9, 0.0001)) * 10) +
+    Math.min(18, (moveRange / Math.max(need * Math.max(2, Math.min(ticks, 6)), 0.0001)) * 12) +
+    Math.min(8, directionFlips * 1.2) -
+    Math.min(20, flatTicks * 7) -
+    Math.min(14, imbalance * 2.5);
+
+  return {
+    ticks,
+    score: Math.max(0, Math.min(100, fitScore)),
+    ready:
+      last12Quotes.length >= 12 &&
+      latestQuote !== null &&
+      activityRatio >= 0.82 &&
+      flatTicks <= 1 &&
+      avgAbsMove >= need &&
+      recentBurst >= need * 0.85 &&
+      moveRange >= need * Math.max(2, Math.min(ticks, 6)),
+  };
+});
+
+const recommendedDualDuration =
+  dualAutoDurationScores
+    .slice()
+    .sort((a, b) => {
+      if (a.ready !== b.ready) return Number(b.ready) - Number(a.ready);
+      return b.score - a.score;
+    })[0] ?? { ticks: rfTickDuration, score: 0, ready: false };
+
+    const buildDualAutoMetrics = (pair: Pair) => {
+  const quotes = (pairQuotesRef.current[pair] ?? []).slice(-12);
+
+  if (quotes.length < 12) {
+    return {
+      pair,
+      ready: false,
+      confidence: 0,
+      threshold: 100,
+      recommendedDuration: { ticks: rfTickDuration, score: 0, ready: false },
+    };
+  }
+
+  const moves = quotes.slice(1).map((q, i) => q - quotes[i]);
+  const up = moves.filter((m) => m > 0).length;
+  const down = moves.filter((m) => m < 0).length;
+  const flat = moves.filter((m) => m === 0).length;
+  const total = moves.length;
+  const active = up + down;
+  const activity = total > 0 ? active / total : 0;
+  const imbalance = Math.abs(up - down);
+  const moveRange = Math.max(...quotes) - Math.min(...quotes);
+
+  const avgAbsMove = moves.length
+    ? moves.reduce((sum, move) => sum + Math.abs(move), 0) / moves.length
+    : 0;
+
+  const last5Moves = moves.slice(-5);
+  const recentBurst = last5Moves.length
+    ? last5Moves.reduce((sum, move) => sum + Math.abs(move), 0) / last5Moves.length
+    : 0;
+
+  const directionFlips = moves.reduce((count, move, index, arr) => {
+    if (index === 0) return 0;
+    const prev = arr[index - 1];
+    if (move === 0 || prev === 0) return count;
+    return Math.sign(move) !== Math.sign(prev) ? count + 1 : count;
+  }, 0);
+
+  const scoreRows = dualAutoDurationOptions.map((ticks) => {
+    const need = getDualDurationNeed(ticks);
+
+    const fitScore =
+      activity * 28 +
+      Math.min(24, (avgAbsMove / Math.max(need, 0.0001)) * 12) +
+      Math.min(20, (recentBurst / Math.max(need * 0.9, 0.0001)) * 10) +
+      Math.min(18, (moveRange / Math.max(need * Math.max(2, Math.min(ticks, 6)), 0.0001)) * 12) +
+      Math.min(8, directionFlips * 1.2) -
+      Math.min(20, flat * 7) -
+      Math.min(14, imbalance * 2.5);
+
+    return {
+      ticks,
+      score: Math.max(0, Math.min(100, fitScore)),
+      ready:
+        activity >= 0.82 &&
+        flat <= 1 &&
+        avgAbsMove >= need &&
+        recentBurst >= need * 0.85 &&
+        moveRange >= need * Math.max(2, Math.min(ticks, 6)),
+    };
+  });
+
+  const recommendedDuration =
+    scoreRows
+      .slice()
+      .sort((a, b) => {
+        if (a.ready !== b.ready) return Number(b.ready) - Number(a.ready);
+        return b.score - a.score;
+      })[0] ?? { ticks: rfTickDuration, score: 0, ready: false };
+
+  const threshold =
+    recommendedDuration.ticks <= 2
+      ? 88
+      : recommendedDuration.ticks <= 5
+      ? 84
+      : recommendedDuration.ticks <= 10
+      ? 80
+      : 76;
+
+  const need = getDualDurationNeed(recommendedDuration.ticks);
+
+  const confidence = Math.max(
+    0,
+    Math.min(
+      100,
+      activity * 32 +
+        Math.min(22, avgAbsMove * 5000) +
+        Math.min(18, recentBurst * 6000) +
+        Math.min(14, moveRange * 2500) +
+        Math.min(8, directionFlips * 1.5) -
+        Math.min(18, flat * 6) -
+        Math.min(12, imbalance * 2.5)
+    )
+  );
+
+  const ready =
+    confidence >= threshold &&
+    activity >= 0.85 &&
+    flat <= 1 &&
+    avgAbsMove >= need &&
+    recentBurst >= need * 0.9 &&
+    moveRange >= need * Math.max(2, Math.min(recommendedDuration.ticks, 6));
+
+  return {
+    pair,
+    ready,
+    confidence,
+    threshold,
+    recommendedDuration,
+  };
+};
+
+const dualAutoStepCandidates = STEP_ONLY_PAIRS
+  .map((pair) => buildDualAutoMetrics(pair))
+  .sort((a, b) => {
+    if (a.ready !== b.ready) return Number(b.ready) - Number(a.ready);
+    if (b.confidence !== a.confidence) return b.confidence - a.confidence;
+    return b.recommendedDuration.score - a.recommendedDuration.score;
+  });
+
+const bestDualAutoStepCandidate = dualAutoStepCandidates[0] ?? null;
+
+const dualAutoTargetPair =
+  dualAutoScope === "best-step" && bestDualAutoStepCandidate
+    ? bestDualAutoStepCandidate.pair
+    : selectedPair;
+
+const dualAutoExecutionDuration =
+  dualAutoScope === "best-step" && bestDualAutoStepCandidate
+    ? bestDualAutoStepCandidate.recommendedDuration.ticks
+    : recommendedDualDuration.ticks;
+
+const dualAutoExecutionReady =
+  dualAutoScope === "best-step" && bestDualAutoStepCandidate
+    ? bestDualAutoStepCandidate.ready
+    : dualAutoReady;
+
+const dualAutoExecutionConfidence =
+  dualAutoScope === "best-step" && bestDualAutoStepCandidate
+    ? bestDualAutoStepCandidate.confidence
+    : dualAutoConfidence;
+
   const riseFallTrades = tradeHistory.filter((t) => t.type === "Rise" || t.type === "Fall");
 
   const tickBadges = last12Quotes.slice(-8).map((q, i, arr) => {
@@ -4742,25 +5236,131 @@ setRfAllowEquals: React.Dispatch<React.SetStateAction<boolean>>;
     const arrow = move > 0 ? "↑" : move < 0 ? "↓" : "→";
     return { value: q, arrow, tone };
   });
-  
+
+
+  const triggerRfSelectedAction = (action: "Rise" | "Fall" | "Both" | "Auto" | "Dual Auto") => {
+    setRfSelectedAction(action);
+
+    if (rfSelectedResetRef.current) {
+      clearTimeout(rfSelectedResetRef.current);
+    }
+
+    rfSelectedResetRef.current = setTimeout(() => {
+      setRfSelectedAction(null);
+      rfSelectedResetRef.current = null;
+    }, 3000);
+  };
+
+  useEffect(() => {
+    if (!dualAutoEnabled) {
+      setDualAutoCooldownLeft(0);
+      if (dualAutoCooldownRef.current) {
+        clearInterval(dualAutoCooldownRef.current);
+        dualAutoCooldownRef.current = null;
+      }
+      return;
+    }
+
+    const updateCooldown = () => {
+      const remaining = Math.max(0, 60000 - (Date.now() - dualAutoLastPlacedRef.current));
+      setDualAutoCooldownLeft(Math.ceil(remaining / 1000));
+    };
+
+    updateCooldown();
+
+    if (!dualAutoCooldownRef.current) {
+      dualAutoCooldownRef.current = setInterval(updateCooldown, 1000);
+    }
+
+    return () => {
+      if (dualAutoCooldownRef.current) {
+        clearInterval(dualAutoCooldownRef.current);
+        dualAutoCooldownRef.current = null;
+      }
+    };
+  }, [dualAutoEnabled]);
+
+  useEffect(() => {
+    if (!dualAutoEnabled || !dualAutoExecutionReady || dualAutoCooldownLeft > 0) return;
+
+    triggerRfSelectedAction("Dual Auto");
+
+    if (dualAutoTargetPair !== selectedPair) {
+      setSelectedPair(dualAutoTargetPair);
+      return;
+    }
+
+    onPlaceDoubleTrade(dualAutoExecutionDuration);
+    dualAutoLastPlacedRef.current = Date.now();
+    setDualAutoCooldownLeft(60);
+  }, [
+    dualAutoEnabled,
+    dualAutoExecutionReady,
+    dualAutoCooldownLeft,
+    dualAutoTargetPair,
+    selectedPair,
+    dualAutoExecutionDuration,
+    onPlaceDoubleTrade,
+    setSelectedPair,
+  ]);
+
+  // Cleanup effect for Rise/Fall timers
+  useEffect(() => {
+    return () => {
+      if (rfSelectedResetRef.current) {
+        clearTimeout(rfSelectedResetRef.current);
+      }
+      if (dualAutoCooldownRef.current) {
+        clearInterval(dualAutoCooldownRef.current);
+        dualAutoCooldownRef.current = null;
+      }
+    };
+  }, []);
 
   return (
-    <div className="rounded-2xl border border-white/10 overflow-hidden shadow-[0_0_0_1px_rgba(255,255,255,0.06)]">
-      <div className="bg-gradient-to-br from-[#1b2235]/95 to-[#121826] p-6">
-        <div className="flex items-start justify-between gap-3">
+    <div className="overflow-hidden rounded-[28px] border border-cyan-400/15 bg-[radial-gradient(circle_at_top_left,rgba(59,130,246,0.18),rgba(15,23,42,0.95)_45%,rgba(2,6,23,0.98))] shadow-[0_25px_80px_rgba(0,0,0,0.45)]">
+      <div className="p-6 md:p-7">
+        <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
           <div>
-            <p className="text-lg font-semibold text-white/90">Rise/Fall</p>
-            <p className="text-xs text-white/60 mt-1">
-              Smart trend mode: reads live ticks for the selected pair and auto-decides Rise or Fall
-            </p>
+            <div className="flex items-center gap-3">
+              <div className="flex h-12 w-12 items-center justify-center rounded-2xl border border-cyan-400/25 bg-cyan-500/10 text-xl text-cyan-300">
+                ↕
+              </div>
+              <div>
+                <p className="text-[1.9rem] font-bold tracking-tight text-white">Rise/Fall</p>
+                <p className="mt-1 text-sm text-white/55">
+                  Smart trend mode reads live ticks and suggests the strongest direction.
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap gap-2">
+            <span className="inline-flex items-center rounded-full border border-cyan-400/20 bg-cyan-500/10 px-3 py-1 text-[11px] font-semibold uppercase tracking-wide text-cyan-200">
+              Pair: {selectedPair}
+            </span>
+            <span className="inline-flex items-center rounded-full border border-white/10 bg-white/5 px-3 py-1 text-[11px] font-semibold uppercase tracking-wide text-white/70">
+              Stake: {stake.toFixed(2)} {currency}
+            </span>
+            <span className="inline-flex items-center rounded-full border border-white/10 bg-white/5 px-3 py-1 text-[11px] font-semibold uppercase tracking-wide text-white/70">
+              {rfTickDuration} Tick{rfTickDuration > 1 ? "s" : ""}
+            </span>
           </div>
         </div>
 
-        <div className="mt-5 grid grid-cols-1 md:grid-cols-2 gap-4">
-          <div className="bg-black/30 rounded-xl p-4 border border-white/10">
-            <p className="text-[11px] text-white/60 uppercase tracking-wide">Index</p>
+        <div className="mt-6 grid grid-cols-1 gap-5 xl:grid-cols-12">
+          <div className="xl:col-span-6 rounded-[24px] border border-white/10 bg-[linear-gradient(135deg,rgba(15,23,42,0.92),rgba(2,6,23,0.96))] p-5 shadow-[0_0_0_1px_rgba(255,255,255,0.02)]">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <p className="text-[11px] uppercase tracking-[0.24em] text-white/45">Index</p>
+                <p className="mt-1 text-sm text-white/65">Choose the market for live Rise/Fall analysis.</p>
+              </div>
+              <div className="rounded-xl border border-sky-400/20 bg-sky-500/10 px-3 py-1 text-xs font-semibold text-sky-200">
+                Live
+              </div>
+            </div>
             <select
-              className="mt-2 w-full bg-black/40 px-3 py-2 rounded-md border border-white/10"
+              className="mt-4 w-full rounded-xl border border-white/10 bg-black/40 px-4 py-3 text-base text-white outline-none transition focus:border-cyan-400/40 focus:ring-2 focus:ring-cyan-400/20"
               value={selectedPair}
               onChange={(e) => setSelectedPair(e.target.value as Pair)}
             >
@@ -4772,97 +5372,136 @@ setRfAllowEquals: React.Dispatch<React.SetStateAction<boolean>>;
             </select>
           </div>
 
-          <div className="bg-black/30 rounded-xl p-4 border border-white/10">
-            <p className="text-[11px] text-white/60 uppercase tracking-wide">Stake</p>
-            <div className="mt-2 flex items-center gap-2">
+          <div className="xl:col-span-6 rounded-[24px] border border-white/10 bg-[linear-gradient(135deg,rgba(15,23,42,0.92),rgba(2,6,23,0.96))] p-5 shadow-[0_0_0_1px_rgba(255,255,255,0.02)]">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <p className="text-[11px] uppercase tracking-[0.24em] text-white/45">Stake</p>
+                <p className="mt-1 text-sm text-white/65">Set your amount for each Rise/Fall entry.</p>
+              </div>
+              <div className="rounded-xl border border-white/10 bg-white/5 px-3 py-1 text-xs font-semibold text-white/75">
+                {currency}
+              </div>
+            </div>
+            <div className="mt-4 flex items-center gap-3">
               <input
                 type="number"
                 min={0}
                 step={0.01}
-                className="w-full bg-black/40 px-3 py-2 rounded-md border border-white/10"
+                className="w-full rounded-xl border border-white/10 bg-black/40 px-4 py-3 text-base text-white outline-none transition focus:border-cyan-400/40 focus:ring-2 focus:ring-cyan-400/20"
                 value={stake}
                 onChange={(e) => setStake(Number(e.target.value))}
               />
-              <span className="text-xs text-white/60">{currency}</span>
+              <span className="text-sm font-semibold text-white/55">{currency}</span>
             </div>
           </div>
 
-          <div className="bg-black/30 rounded-xl p-4 border border-white/10">
-            <p className="text-[11px] text-white/60 uppercase tracking-wide">Duration (ticks)</p>
+          <div className="xl:col-span-6 rounded-[24px] border border-white/10 bg-[linear-gradient(135deg,rgba(15,23,42,0.92),rgba(2,6,23,0.96))] p-5 shadow-[0_0_0_1px_rgba(255,255,255,0.02)]">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <p className="text-[11px] uppercase tracking-[0.24em] text-white/45">Duration</p>
+                <p className="mt-1 text-sm text-white/65">Shorter durations react faster. 3–10 ticks is usually cleaner.</p>
+              </div>
+              <div className="rounded-xl border border-amber-400/20 bg-amber-500/10 px-3 py-1 text-xs font-semibold text-amber-200">
+                Ticks
+              </div>
+            </div>
+
             <input
               type="number"
               min={1}
               step={1}
-              className="mt-2 w-full bg-black/40 px-3 py-2 rounded-md border border-white/10"
+              className="mt-4 w-full rounded-xl border border-white/10 bg-black/40 px-4 py-3 text-base text-white outline-none transition focus:border-cyan-400/40 focus:ring-2 focus:ring-cyan-400/20"
               value={rfTickDuration}
               onChange={(e) => setRfTickDuration(Math.max(1, Number(e.target.value) || 1))}
             />
-            <p className="text-[11px] text-white/50 mt-2">Tip: use 3–10 ticks and wait for a clear trend before entering.</p>
-            <div className="bg-black/30 rounded-xl p-4 border border-white/10">
-  <p className="text-[11px] text-white/60 uppercase tracking-wide">Allow Equals</p>
 
-  <label className="mt-3 flex items-center justify-between gap-3 cursor-pointer">
-    <div>
-      <p className="text-sm font-semibold text-white/85">Allow Equals</p>
-      <p className="text-[11px] text-white/50 mt-1">
-        When enabled, equal exit/entry spots count as a win for Rise and Fall trades.
-      </p>
-    </div>
-
-    <button
-      type="button"
-      aria-pressed={rfAllowEquals}
-      onClick={() => setRfAllowEquals((v) => !v)}
-      className={`w-12 h-6 rounded-full relative transition ${
-        rfAllowEquals ? "bg-emerald-500" : "bg-white/15"
-      }`}
-    >
-      <span
-        className={`absolute top-0.5 w-5 h-5 bg-white rounded-full transition ${
-          rfAllowEquals ? "right-0.5" : "left-0.5"
-        }`}
-      />
-    </button>
-  </label>
-
-  <p className="text-[11px] text-sky-300 mt-3">
-    Current mode: {rfAllowEquals ? "ON — Allow Equals active" : "OFF — strict Rise/Fall only"}
-  </p>
-</div>
+            <p className="mt-3 text-[12px] leading-6 text-white/45">
+              Tip: avoid entering too early when the trend is weak or sideways.
+            </p>
+          
           </div>
 
-          <div className="bg-black/30 rounded-xl p-4 border border-white/10">
-            <p className="text-[11px] text-white/60 uppercase tracking-wide">Trend engine</p>
-            <div className="mt-2 space-y-2 text-xs text-white/75">
-              <p>
-                Current quote: <span className="font-semibold text-white/90">{latestQuote !== null ? latestQuote : "Waiting for ticks..."}</span>
-              </p>
-              <p>
-                Trend:{" "}
-                <span
-                  className={`font-semibold ${
-                    trendDirection === "UPTREND"
-                      ? "text-emerald-300"
-                      : trendDirection === "DOWNTREND"
-                      ? "text-red-300"
-                      : "text-yellow-200"
-                  }`}
-                >
-                  {trendDirection}
+          <div className="xl:col-span-12 rounded-[24px] border border-white/10 bg-[linear-gradient(135deg,rgba(15,23,42,0.92),rgba(2,6,23,0.96))] p-5 shadow-[0_0_0_1px_rgba(255,255,255,0.02)]">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <p className="text-[11px] uppercase tracking-[0.24em] text-white/45">Trend Engine</p>
+                <p className="mt-1 text-sm text-white/65">Live signal quality, direction, and momentum.</p>
+              </div>
+              <span
+                className={`inline-flex rounded-full border px-3 py-1 text-[11px] font-bold uppercase tracking-wide ${
+                  trendDirection === "UPTREND"
+                    ? "border-emerald-400/25 bg-emerald-500/10 text-emerald-200"
+                    : trendDirection === "DOWNTREND"
+                    ? "border-rose-400/25 bg-rose-500/10 text-rose-200"
+                    : "border-amber-400/25 bg-amber-500/10 text-amber-200"
+                }`}
+              >
+                {trendDirection}
+              </span>
+            </div>
+
+            <div className="mt-5 grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
+              <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
+                <p className="text-[11px] uppercase tracking-wide text-white/45">Current Quote</p>
+                <p className="mt-2 text-2xl font-bold text-white">
+                  {latestQuote !== null ? latestQuote : "Waiting..."}
+                </p>
+              </div>
+
+              <div className="rounded-2xl border border-cyan-400/15 bg-cyan-500/8 p-4">
+                <p className="text-[11px] uppercase tracking-wide text-white/45">Auto Decision</p>
+                <p className="mt-2 text-2xl font-bold text-cyan-300">
+                  {recommendedTrade ?? "WAIT"}
+                </p>
+              </div>
+
+              <div className="rounded-2xl border border-violet-400/15 bg-violet-500/8 p-4">
+                <p className="text-[11px] uppercase tracking-wide text-white/45">Dual Auto Confidence</p>
+                <p className="mt-2 text-2xl font-bold text-violet-300">
+                  {dualAutoConfidence.toFixed(0)}%
+                </p>
+              </div>
+              <div className="rounded-2xl border border-amber-400/15 bg-amber-500/8 p-4">
+  <p className="text-[11px] uppercase tracking-wide text-white/45">Recommended Dual Duration</p>
+  <p className="mt-2 text-2xl font-bold text-amber-300">
+    {recommendedDualDuration.ticks} ticks
+  </p>
+  <p className="mt-1 text-[11px] text-white/65">
+    Fit score: {recommendedDualDuration.score.toFixed(0)}%
+  </p>
+</div>
+            </div>
+
+            <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-3">
+              <div className="rounded-2xl border border-emerald-400/12 bg-emerald-500/6 p-4">
+                <p className="text-[11px] uppercase tracking-wide text-white/45">Up Ticks</p>
+                <p className="mt-2 text-xl font-bold text-emerald-300">{upTicks}</p>
+              </div>
+              <div className="rounded-2xl border border-rose-400/12 bg-rose-500/6 p-4">
+                <p className="text-[11px] uppercase tracking-wide text-white/45">Down Ticks</p>
+                <p className="mt-2 text-xl font-bold text-rose-300">{downTicks}</p>
+              </div>
+              <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
+                <p className="text-[11px] uppercase tracking-wide text-white/45">Flat</p>
+                <p className="mt-2 text-xl font-bold text-white/80">{flatTicks}</p>
+              </div>
+            </div>
+
+            <div className="mt-4 rounded-2xl border border-white/10 bg-black/20 p-4 space-y-3 text-sm text-white/70">
+              <div className="flex items-center justify-between gap-3">
+                <span>Move 6 / 12 / 20</span>
+                <span className="font-semibold text-white/90">
+                  {shortMove.toFixed(4)} / {mediumMove.toFixed(4)} / {longMove.toFixed(4)}
                 </span>
-              </p>
-              <p>
-                Auto decision: <span className="font-semibold text-sky-300">{recommendedTrade ?? "WAIT / NO TRADE"}</span>
-              </p>
-              <p>
-                Up ticks: <span className="text-emerald-300">{upTicks}</span> • Down ticks: <span className="text-red-300">{downTicks}</span> • Flat: <span className="text-white/60">{flatTicks}</span>
-              </p>
-              <p>
-                Move 6/12/20: <span className="text-white/90">{shortMove.toFixed(4)} / {mediumMove.toFixed(4)} / {longMove.toFixed(4)}</span>
-              </p>
-              <p>
-                Avg tick move: <span className="text-white/90">{avgMove.toFixed(5)}</span> • Strength: <span className="text-white/90">{trendStrength.toFixed(4)}</span>
-              </p>
+              </div>
+              <div className="flex items-center justify-between gap-3">
+                <span>Avg Tick Move</span>
+                <span className="font-semibold text-white/90">{avgMove.toFixed(5)}</span>
+              </div>
+              <div className="flex items-center justify-between gap-3">
+                <span>Strength</span>
+                <span className="font-semibold text-white/90">{trendStrength.toFixed(4)}</span>
+              </div>
             </div>
           </div>
         </div>
@@ -4895,44 +5534,193 @@ setRfAllowEquals: React.Dispatch<React.SetStateAction<boolean>>;
           </div>
         </div>
 
-        <div className="mt-5 bg-black/20 border border-white/10 rounded-xl p-4">
+          <div className="mt-5 bg-black/20 border border-white/10 rounded-xl p-4">
           <p className="text-[11px] text-white/60 uppercase tracking-wide">Trade actions</p>
-          <div className="mt-3 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-2">
-  <button
-    onClick={() => recommendedTrade && onPlaceTrade(recommendedTrade, rfTickDuration)}
-    disabled={!recommendedTrade}
-    className={`text-sm font-semibold px-4 py-2 rounded-md ${
-      recommendedTrade
-        ? "bg-sky-500/90 hover:bg-sky-500 text-white"
-        : "bg-white/10 text-white/40 cursor-not-allowed"
-    }`}
-  >
-    Auto trade: {recommendedTrade ?? "Waiting..."}
-  </button>
 
-  <button
-    onClick={() => onPlaceTrade("Rise", rfTickDuration)}
-    className="bg-emerald-500/90 hover:bg-emerald-500 text-sm font-semibold px-4 py-2 rounded-md"
-  >
-    Manual Rise (CALL)
-  </button>
+          <div className="mt-4 space-y-3">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <button
+                type="button"
+                onClick={() => {
+                  triggerRfSelectedAction("Rise");
+                  onPlaceTrade("Rise", rfTickDuration);
+                }}
+                className={`rounded-xl px-4 py-4 text-center font-bold tracking-wide border transition-all duration-200 shadow-md ${
+  rfSelectedAction === "Rise"
+    ? "border-emerald-200 bg-gradient-to-r from-emerald-400 to-emerald-500 text-white ring-4 ring-emerald-300/60 shadow-[0_0_28px_rgba(16,185,129,0.50)]"
+    : "border-emerald-900/80 bg-gradient-to-r from-emerald-950 to-emerald-900 text-emerald-100/90 hover:border-emerald-700"
+}`}
+              >
+                <div className="flex items-center justify-center gap-2 text-2xl leading-none">
+                  <span>↑</span>
+                  <span>RISE</span>
+                  {rfSelectedAction === "Rise" && <span className="text-base">✓</span>}
+                </div>
+                <div className="mt-1.5 text-xl font-semibold opacity-95">${stake.toFixed(2)}</div>
+              </button>
 
-  <button
-    onClick={() => onPlaceTrade("Fall", rfTickDuration)}
-    className="bg-red-500/90 hover:bg-red-500 text-sm font-semibold px-4 py-2 rounded-md"
-  >
-    Manual Fall (PUT)
-  </button>
+              <button
+                type="button"
+                onClick={() => {
+                  triggerRfSelectedAction("Fall");
+                  onPlaceTrade("Fall", rfTickDuration);
+                }}
+                className={`rounded-xl px-4 py-4 text-center font-bold tracking-wide border transition-all duration-200 shadow-md ${
+  rfSelectedAction === "Fall"
+    ? "border-rose-200 bg-gradient-to-r from-rose-400 to-pink-500 text-white ring-4 ring-rose-300/60 shadow-[0_0_28px_rgba(244,63,94,0.50)]"
+    : "border-rose-900/80 bg-gradient-to-r from-rose-950 to-rose-900 text-rose-100/90 hover:border-rose-700"
+}`}
+              >
+                <div className="flex items-center justify-center gap-2 text-2xl leading-none">
+                  <span>↓</span>
+                  <span>FALL</span>
+                  {rfSelectedAction === "Fall" && <span className="text-base">✓</span>}
+                </div>
+                <div className="mt-1.5 text-xl font-semibold opacity-95">${stake.toFixed(2)}</div>
+              </button>
+            </div>
 
-  <button
-    onClick={() => onPlaceDoubleTrade(rfTickDuration)}
-    className="bg-violet-500/90 hover:bg-violet-500 text-sm font-semibold px-4 py-2 rounded-md"
+            <button
+              type="button"
+              onClick={() => {
+                triggerRfSelectedAction("Both");
+                onPlaceDoubleTrade(rfTickDuration);
+              }}
+              className={`w-full rounded-xl px-4 py-4 text-center font-bold tracking-wide border transition-all duration-200 shadow-md ${
+  rfSelectedAction === "Both"
+    ? "border-sky-200 bg-gradient-to-r from-blue-400 via-cyan-400 to-blue-500 text-white ring-4 ring-sky-300/60 shadow-[0_0_30px_rgba(56,189,248,0.50)]"
+    : "border-sky-900/80 bg-gradient-to-r from-slate-950 via-sky-950 to-slate-900 text-sky-100/90 hover:border-sky-700"
+}`}
+            >
+              <div className="flex items-center justify-center gap-2 text-2xl leading-none">
+                <span className="text-emerald-300">↑</span>
+                <span>RISE + FALL</span>
+                <span className="text-rose-300">↓</span>
+                {rfSelectedAction === "Both" && <span className="text-base text-white">✓</span>}
+              </div>
+              <div className="mt-1.5 text-xl font-semibold opacity-95">
+                2x ${stake.toFixed(2)} = {(stake * 2).toFixed(2)}
+              </div>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                triggerRfSelectedAction("Auto");
+                if (recommendedTrade) onPlaceTrade(recommendedTrade, rfTickDuration);
+              }}
+              disabled={!recommendedTrade}
+              className={`w-full rounded-xl px-4 py-3 text-center font-semibold border transition-all duration-200 ${
+  !recommendedTrade
+    ? "border-white/10 bg-slate-900 text-white/35 cursor-not-allowed"
+    : rfSelectedAction === "Auto"
+    ? "border-violet-200 bg-gradient-to-r from-violet-500 to-fuchsia-500 text-white ring-4 ring-violet-300/60 shadow-[0_0_28px_rgba(168,85,247,0.48)]"
+    : "border-violet-950/80 bg-gradient-to-r from-slate-950 to-violet-950 text-violet-100/90 hover:border-violet-700"
+}`}
+            >
+              <>
+                Auto trade: {recommendedTrade ?? "Waiting..."}
+                {rfSelectedAction === "Auto" && recommendedTrade && <span className="ml-2">✓</span>}
+              </>
+            </button>
+            <div className="w-full rounded-xl border border-white/10 bg-black/20 p-3">
+  <label className="block text-[11px] font-medium uppercase tracking-wide text-white/55 mb-2">
+    Dual Auto Scan Mode
+  </label>
+  <select
+    value={dualAutoScope}
+    onChange={(e) => setDualAutoScope(e.target.value as "selected" | "best-step")}
+    className="w-full rounded-lg border border-white/10 bg-slate-950 px-3 py-2 text-sm text-white outline-none"
   >
-    Double Entry (Rise + Fall)
-  </button>
+    <option value="selected">Current selected index</option>
+    <option value="best-step">Scan all Step indexes</option>
+  </select>
+
+  <p className="mt-2 text-[11px] text-white/60">
+    {dualAutoScope === "best-step"
+      ? bestDualAutoStepCandidate
+        ? `Best Step pair now: ${bestDualAutoStepCandidate.pair} • ${bestDualAutoStepCandidate.recommendedDuration.ticks} ticks • ${bestDualAutoStepCandidate.confidence.toFixed(0)}% confidence`
+        : "Scanning Step indexes for the best pair..."
+      : `Using current index: ${selectedPair}`}
+  </p>
 </div>
+            <button
+              type="button"
+              onClick={() => {
+                triggerRfSelectedAction("Dual Auto");
+                setDualAutoEnabled((v) => !v);
+              }}
+              className={`w-full rounded-xl px-4 py-3 text-center font-semibold border transition-all duration-200 ${
+                dualAutoEnabled
+                  ? "border-amber-200 bg-gradient-to-r from-amber-500 to-orange-500 text-white ring-4 ring-amber-300/60 shadow-[0_0_28px_rgba(251,146,60,0.48)]"
+                  : "border-amber-950/80 bg-gradient-to-r from-slate-950 to-amber-950 text-amber-100/90 hover:border-amber-700"
+              }`}
+            >
+              <div className="flex items-center justify-center gap-2">
+                <span>Dual Auto</span>
+                {dualAutoEnabled && <span>✓</span>}
+              </div>
+              <div className="mt-1 text-xs font-medium text-white/80">
+  {dualAutoEnabled
+  ? dualAutoCooldownLeft > 0
+    ? `Cooldown: ${dualAutoCooldownLeft}s • ${dualAutoTargetPair} • ${dualAutoExecutionDuration} ticks queued`
+    : dualAutoExecutionReady
+    ? `Ready • ${dualAutoTargetPair} • ${dualAutoExecutionDuration} ticks`
+    : `Watching • ${dualAutoTargetPair} • best fit ${dualAutoExecutionDuration} ticks`
+  : dualAutoScope === "best-step"
+  ? "Scans all Step indexes and chooses the best pair"
+  : `Places 1 Rise + 1 Fall on ${selectedPair}`}
+</div>
+            </button>
+            <button
+  type="button"
+  aria-pressed={rfAllowEquals}
+  onClick={() => setRfAllowEquals((v) => !v)}
+  className={`w-full rounded-xl px-4 py-3 text-left font-semibold border transition-all duration-200 ${
+    rfAllowEquals
+      ? "border-emerald-200 bg-gradient-to-r from-emerald-500 to-teal-500 text-white ring-4 ring-emerald-300/60 shadow-[0_0_28px_rgba(16,185,129,0.48)]"
+      : "border-white/10 bg-slate-950 text-white/85 hover:border-white/20"
+  }`}
+>
+  <div className="flex items-center justify-between gap-4">
+    <div>
+      <div className="flex items-center gap-2 text-sm uppercase tracking-wide text-white/65">
+        <span>Allow Equals</span>
+        {rfAllowEquals && <span className="text-white">✓</span>}
+      </div>
+      <div className="mt-1 text-base font-bold text-white">
+        {rfAllowEquals ? "ON" : "OFF"}
+      </div>
+      <div className="mt-1 text-xs text-white/70">
+        Equal entry and exit spots count as a win for Rise and Fall trades.
+      </div>
+    </div>
+
+    <div
+      className={`relative h-7 w-14 rounded-full border transition ${
+        rfAllowEquals
+          ? "border-white/30 bg-white/20"
+          : "border-white/15 bg-black/30"
+      }`}
+    >
+      <span
+        className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition ${
+          rfAllowEquals ? "right-1" : "left-1"
+        }`}
+      />
+    </div>
+  </div>
+</button>
+          </div>
+
+          <p className="mt-2 text-[11px] font-medium text-cyan-300/90">
+            Selected: {rfSelectedAction ?? "None"}
+          </p>
+          <p className="text-[11px] font-medium text-amber-300/90">
+Dual Auto: {dualAutoEnabled ? (dualAutoCooldownLeft > 0 ? `Cooling down (${dualAutoCooldownLeft}s) • ${dualAutoTargetPair} • next ${dualAutoExecutionDuration} ticks` : dualAutoExecutionReady ? `Armed • ${dualAutoTargetPair} • ${dualAutoExecutionDuration} ticks • ${dualAutoExecutionConfidence.toFixed(0)}% confidence` : `Watching market • ${dualAutoTargetPair} • best ${dualAutoExecutionDuration} ticks • ${dualAutoExecutionConfidence.toFixed(0)}%`) : "Off"}
+</p>
           <p className="text-[11px] text-white/50 mt-2">
-  Auto follows the live trend engine. Double Entry places both Rise and Fall at the same time using the same pair, stake, and tick duration. Allow Equals applies to Auto, Manual Rise, Manual Fall, and Double Entry.
+  Auto follows the live trend engine. Dual Auto can either use the current selected index or scan all Step indexes and pick the strongest Step pair. It recommends the best duration from 2, 4, 6, 8, or 10 ticks based on live movement quality, then places 1 Rise + 1 Fall together using that pair and duration when confidence is strong enough. After each dual trade it waits 60 seconds before the next entry. Allow Equals applies to Auto, Dual Auto, Rise, Fall, and Rise + Fall.
 </p>
         </div>
 
