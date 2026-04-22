@@ -708,8 +708,7 @@ export default function MetroXPanel({
     <button
       onClick={run1xAutoAllPairs}
       disabled={auto1xRunning}
-      className={`w-full rounded-xl py-3 text-sm font-semibold shadow-[0_0_0_1px_rgba(255,255,255,0.10)] transition active:scale-[0_0_0_1px_rgba(255,255,255,0.10)] transition active:scale-[0.98] ${
-        auto1xRunning
+className={`w-full rounded-xl py-3 text-sm font-semibold shadow-[0_0_0_1px_rgba(255,255,255,0.10)] transition active:scale-[0.98] ${        auto1xRunning
           ? "bg-slate-600 cursor-not-allowed animate-pulse"
           : "bg-indigo-600 hover:bg-indigo-700 active:brightness-110"
       }`}

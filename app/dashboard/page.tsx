@@ -447,6 +447,17 @@ function readStrategyFlags(): StrategyFlags {
   }
 }
 const MIN_TRADE_INTERVAL_MS = 400;
+type ReinvestThreshold = 25 | 50 | 75 | 100;
+
+function getReinvestedStake(
+  baseStake: number,
+  profit: number,
+  threshold: ReinvestThreshold
+) {
+  const safeBase = Number.isFinite(baseStake) ? Math.max(0, baseStake) : 0;
+  const safeProfit = Number.isFinite(profit) ? Math.max(0, profit) : 0;
+  return Number((safeBase + safeProfit * (threshold / 100)).toFixed(2));
+}
 
 // ============================================================================
 // Main dashboard container
@@ -635,6 +646,12 @@ useEffect(() => {
   // eslint-disable-next-line react-hooks/exhaustive-deps
 }, [selectedPair]);
   const [stake, setStake] = useState<number>(1);
+  const [reinvestProfitsEnabled, setReinvestProfitsEnabled] = useState(false);
+  const [reinvestThreshold, setReinvestThreshold] =
+    useState<ReinvestThreshold>(25);
+  const manualStakeRef = useRef(1);
+  const processedProfitTradeIdsRef = useRef<Record<number, true>>({});
+  const [tradeHistory, setTradeHistory] = useState<Trade[]>([]);
   const [selectedDigit, setSelectedDigit] = useState<number | null>(null);
   // ✅ keep latest selected digit for Fast Auto loop
 const selectedDigitRef = useRef<number | null>(null);
@@ -642,6 +659,42 @@ const selectedDigitRef = useRef<number | null>(null);
 useEffect(() => {
   selectedDigitRef.current = selectedDigit;
 }, [selectedDigit]);
+
+const handleStakeChange: React.Dispatch<React.SetStateAction<number>> = (value) => {
+  const nextStake = typeof value === "function" ? value(manualStakeRef.current) : value;
+  const normalizedStake = Number.isFinite(nextStake) ? nextStake : 0;
+  manualStakeRef.current = normalizedStake;
+  setStake(normalizedStake);
+};
+
+useEffect(() => {
+  if (!reinvestProfitsEnabled) {
+    setStake(manualStakeRef.current);
+    return;
+  }
+
+  const profitableTrades = tradeHistory.filter(
+    (trade) =>
+      trade.result !== "Pending" &&
+      Number(trade.profit ?? 0) > 0 &&
+      !processedProfitTradeIdsRef.current[trade.id]
+  );
+
+  if (!profitableTrades.length) return;
+
+  profitableTrades.forEach((trade) => {
+    processedProfitTradeIdsRef.current[trade.id] = true;
+  });
+
+  const totalNewProfit = profitableTrades.reduce(
+    (sum, trade) => sum + Number(trade.profit ?? 0),
+    0
+  );
+
+  setStake((currentStake) =>
+    getReinvestedStake(currentStake, totalNewProfit, reinvestThreshold)
+  );
+}, [tradeHistory, reinvestProfitsEnabled, reinvestThreshold]);
 
   // ============================================================================
   // Strategy state: MetroX
@@ -651,7 +704,6 @@ useEffect(() => {
   const [rfTickDuration, setRfTickDuration] = useState<number | string>(2);
   const [rfAllowEquals, setRfAllowEquals] = useState(false);
 
-  const [tradeHistory, setTradeHistory] = useState<Trade[]>([]);
 
   const [instant3xRunning, setInstant3xRunning] = useState(false);
   const [turboMode, setTurboMode] = useState(false);
@@ -935,6 +987,9 @@ reqInfoRef.current = {};
     setSelectedDigit(null);
     setLastWinDigit(null);
     setLastLossDigit(null);
+    processedProfitTradeIdsRef.current = {};
+setReinvestProfitsEnabled(false);
+setStake(manualStakeRef.current);
 
     const ws = new WebSocket(`wss://ws.derivws.com/websockets/v3?app_id=${APP_ID}`);
     wsRef.current = ws;
@@ -1141,6 +1196,9 @@ if (data.msg_type === "proposal") {
   fastAutoCancelRef.current = true;
   setFastAutoRunning(false);
   setBarrierOptimizerLive(false);
+  setReinvestProfitsEnabled(false);
+  processedProfitTradeIdsRef.current = {};
+  setStake(manualStakeRef.current);
 
   wsRef.current?.close();
   wsRef.current = null;
@@ -1152,6 +1210,9 @@ if (data.msg_type === "proposal") {
   const logout = () => {
     disconnect();
     setBarrierOptimizerLive(false);
+    setReinvestProfitsEnabled(false);
+    processedProfitTradeIdsRef.current = {};
+    setStake(manualStakeRef.current);
     localStorage.clear();
     router.replace("/");
     localStorage.removeItem("deriv_token");
@@ -2280,11 +2341,60 @@ const toggleSpiderRandomAuto = async () => {
                 </div>
 
                 <div className="bg-black/30 rounded-xl p-4 border border-white/10">
-                  <p className="text-white/55 text-xs uppercase tracking-wide">Session Profit/Loss</p>
-                  <p className={`font-semibold text-lg ${sessionNetProfit >= 0 ? "text-emerald-400" : "text-red-400"}`}>
-  {sessionNetProfit >= 0 ? "+" : ""}
-  {sessionNetProfit.toFixed(2)} {currency}
-</p>
+                  <p className="text-white/55 text-xs uppercase tracking-wide">
+                    Session Profit/Loss
+                  </p>
+                  <p
+                    className={`font-semibold text-lg ${
+                      sessionNetProfit >= 0 ? "text-emerald-400" : "text-red-400"
+                    }`}
+                  >
+                    {sessionNetProfit >= 0 ? "+" : ""}
+                    {sessionNetProfit.toFixed(2)} {currency}
+                  </p>
+                </div>
+
+                <div className="bg-black/30 rounded-xl p-4 border border-white/10 sm:col-span-2 xl:col-span-1">
+                  <div className="flex items-center justify-between gap-3 mb-3">
+                    <p className="text-white/55 text-xs uppercase tracking-wide">
+                      Re-Invest Profits
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => setReinvestProfitsEnabled((prev) => !prev)}
+                      className={`rounded-full px-3 py-1 text-xs font-semibold border transition ${
+                        reinvestProfitsEnabled
+                          ? "bg-emerald-500/20 text-emerald-300 border-emerald-400/40"
+                          : "bg-white/5 text-white/70 border-white/10"
+                      }`}
+                    >
+                      {reinvestProfitsEnabled ? "On" : "Off"}
+                    </button>
+                  </div>
+
+                  <div className="grid grid-cols-4 gap-2">
+                    {([25, 50, 75, 100] as const).map((value) => {
+                      const active = reinvestThreshold === value;
+
+                      return (
+                        <button
+                          key={value}
+                          type="button"
+                          onClick={() => setReinvestThreshold(value)}
+                          className={`rounded-lg px-3 py-2 text-xs font-semibold border transition ${
+                            active
+                              ? "bg-indigo-500/20 text-indigo-200 border-indigo-400/40"
+                              : "bg-white/5 text-white/70 border-white/10 hover:bg-white/10"
+                          }`}
+                        >
+                          {value}%
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  <p className="mt-2 text-[11px] text-white/45">
+                  </p>
                 </div>
               </div>
             </div>
@@ -2348,7 +2458,7 @@ const toggleSpiderRandomAuto = async () => {
     ticks={ticks}
     pipSize={pipSize}
     stake={stake}
-    setStake={setStake}
+    setStake={handleStakeChange}
     selectedDigit={selectedDigit}
     setSelectedDigit={setSelectedDigit}
     selectedPair={selectedPair}
@@ -2405,7 +2515,7 @@ const toggleSpiderRandomAuto = async () => {
   indexGroups={INDEX_GROUPS}
   pairDigitsRef={pairDigitsRef}
   selectedPair={selectedPair}
-  setStake={setStake}
+  setStake={handleStakeChange}
   stake={stake}
   setSelectedPair={(p: Pair) => {
     resetPairNow(p);
@@ -2453,7 +2563,7 @@ const toggleSpiderRandomAuto = async () => {
     setSelectedPair(p);
   }}
   stake={stake}
-  setStake={setStake}
+  setStake={handleStakeChange}
   rfTickDuration={rfTickDuration}
   setRfTickDuration={setRfTickDuration}
   rfAllowEquals={rfAllowEquals}
@@ -2483,7 +2593,7 @@ tradeHistoryPanel={
       selectedPair={selectedPair}
       setSelectedPair={setSelectedPair}
       stake={stake}
-      setStake={setStake}
+      setStake={handleStakeChange}
       currency={currency}
       onPlaceHigherLowerTrade={placeHigherLowerTrade}
       requestHigherLowerPreview={requestHigherLowerPreview}
