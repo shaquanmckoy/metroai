@@ -9,7 +9,129 @@ import DerivChart from "@/components/DerivChart";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 
-const APP_ID = 1089;
+const FALLBACK_DERIV_APP_ID = "1089";
+const RAW_DERIV_APP_ID = process.env.NEXT_PUBLIC_DERIV_APP_ID?.trim();
+const APP_ID = RAW_DERIV_APP_ID && RAW_DERIV_APP_ID.length > 0 ? RAW_DERIV_APP_ID : FALLBACK_DERIV_APP_ID;
+
+const LEGACY_DERIV_WS_URL = `wss://ws.derivws.com/websockets/v3?app_id=${APP_ID}`;
+const DERIV_OAUTH_BASE_URL = "https://oauth.deriv.com/oauth2/authorize";
+const DERIV_OPTIONS_API_BASE = "https://api.derivws.com";
+
+type DerivOAuthAccount = {
+  accountId: string;
+  token: string;
+  currency: string;
+};
+
+function normalizeDerivToken(value: string) {
+  return value.trim().replace(/^Bearer\s+/i, "");
+}
+
+function buildDerivOAuthUrl() {
+  const params = new URLSearchParams({ app_id: String(APP_ID) });
+  return `${DERIV_OAUTH_BASE_URL}?${params.toString()}`;
+}
+
+function readDerivApiError(data: any) {
+  const firstRestError = Array.isArray(data?.errors) ? data.errors[0] : null;
+
+  return (
+    data?.error?.message ||
+    firstRestError?.message ||
+    data?.message ||
+    "Deriv did not return options trading accounts."
+  );
+}
+
+function extractOptionsAccountId(account: any) {
+  return String(
+    account?.account_id ||
+      account?.loginid ||
+      account?.login_id ||
+      account?.id ||
+      account?.accountId ||
+      ""
+  ).toUpperCase();
+}
+
+async function fetchOptionsTradingAccounts(accounts: DerivOAuthAccount[]) {
+  if (!accounts.length) return [] as DerivOAuthAccount[];
+
+  const byId = new Map(accounts.map((account) => [account.accountId.toUpperCase(), account]));
+  const matched = new Map<string, DerivOAuthAccount>();
+  let lastError = "";
+
+  for (const account of accounts) {
+    try {
+      const response = await fetch(`${DERIV_OPTIONS_API_BASE}/trading/v1/options/accounts`, {
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${account.token}`,
+          "Deriv-App-ID": String(APP_ID),
+        },
+      });
+
+      const data = await response.json().catch(() => null);
+
+      if (!response.ok) {
+        lastError = readDerivApiError(data);
+        continue;
+      }
+
+      const rawAccounts = Array.isArray(data?.data)
+        ? data.data
+        : Array.isArray(data?.accounts)
+          ? data.accounts
+          : Array.isArray(data)
+            ? data
+            : [];
+
+      rawAccounts.forEach((rawAccount: any) => {
+        const accountId = extractOptionsAccountId(rawAccount);
+        const oauthAccount = byId.get(accountId);
+        if (!oauthAccount) return;
+
+        matched.set(accountId, {
+          ...oauthAccount,
+          currency: String(rawAccount?.currency || oauthAccount.currency || "USD").toUpperCase(),
+        });
+      });
+    } catch (err) {
+      lastError = err instanceof Error ? err.message : "Could not check Deriv options accounts.";
+    }
+  }
+
+  if (matched.size) return Array.from(matched.values());
+
+  console.warn(lastError || "No Deriv options trading accounts matched the OAuth accounts.");
+  return accounts;
+}
+
+function parseDerivOAuthAccounts() {
+  if (typeof window === "undefined") return [] as DerivOAuthAccount[];
+
+  const combinedParams = new URLSearchParams(
+    `${window.location.search.replace(/^\?/, "")}&${window.location.hash.replace(/^#/, "")}`
+  );
+
+  const accounts: DerivOAuthAccount[] = [];
+
+  for (let i = 1; i <= 50; i++) {
+    const accountId = combinedParams.get(`acct${i}`);
+    const token = combinedParams.get(`token${i}`);
+    const currency = combinedParams.get(`cur${i}`) || "USD";
+
+    if (!accountId || !token) continue;
+
+    accounts.push({
+      accountId: accountId.toUpperCase(),
+      token: normalizeDerivToken(token),
+      currency: currency.toUpperCase(),
+    });
+  }
+
+  return accounts;
+}
 // ============================================================================
 // SAFE REFACTOR ORDER
 // 1) Extract pure display components first.
@@ -593,7 +715,81 @@ const pairQuotesRef = useRef<Record<Pair, number[]>>(
 const lastAuto1xPairRef = useRef<Pair | null>(null);
 
   const [token, setToken] = useState("");
-  const [connected, setConnected] = useState(false);
+const [derivAccountId, setDerivAccountId] = useState("");
+const [oauthAccounts, setOauthAccounts] = useState<DerivOAuthAccount[]>([]);
+const [selectedOAuthIndex, setSelectedOAuthIndex] = useState(0);
+const [derivLoginStatus, setDerivLoginStatus] = useState("");
+const [connected, setConnected] = useState(false);
+
+useEffect(() => {
+  const applyAccounts = (accounts: DerivOAuthAccount[], status = "") => {
+    setOauthAccounts(accounts);
+    setSelectedOAuthIndex(0);
+    setDerivLoginStatus(status);
+
+    const first = accounts[0];
+    if (!first) return;
+
+    setToken(first.token);
+    setDerivAccountId(first.accountId);
+    setCurrency(first.currency);
+
+    localStorage.setItem("deriv_oauth_accounts", JSON.stringify(accounts));
+    localStorage.setItem("deriv_token", first.token);
+    localStorage.setItem("deriv_account_id", first.accountId);
+  };
+
+  const loadDerivAccounts = async () => {
+    const accountsFromRedirect = parseDerivOAuthAccounts();
+
+    if (accountsFromRedirect.length) {
+      setDerivLoginStatus("Checking which Deriv accounts support Options trading...");
+
+      const optionsAccounts = await fetchOptionsTradingAccounts(accountsFromRedirect);
+      applyAccounts(optionsAccounts, `${optionsAccounts.length} Options trading account(s) loaded.`);
+
+      window.history.replaceState({}, document.title, window.location.pathname);
+      return;
+    }
+
+    try {
+      const savedAccounts = JSON.parse(
+        localStorage.getItem("deriv_oauth_accounts") || "[]"
+      ) as DerivOAuthAccount[];
+
+      if (Array.isArray(savedAccounts) && savedAccounts.length) {
+        applyAccounts(savedAccounts, `${savedAccounts.length} saved Deriv account(s) loaded.`);
+      }
+    } catch {}
+  };
+
+  void loadDerivAccounts();
+}, []);
+
+const loginWithDeriv = () => {
+  const loginUrl = buildDerivOAuthUrl();
+
+  setDerivLoginStatus(
+    APP_ID === FALLBACK_DERIV_APP_ID
+      ? `Opening Deriv secure login with fallback app ID ${APP_ID}. For production, create your own Deriv app and set NEXT_PUBLIC_DERIV_APP_ID.`
+      : `Opening Deriv secure login with app ID ${APP_ID}...`
+  );
+
+  window.location.href = loginUrl;
+};
+
+const selectDerivOAuthAccount = (index: number) => {
+  const account = oauthAccounts[index];
+  if (!account) return;
+
+  setSelectedOAuthIndex(index);
+  setToken(account.token);
+  setDerivAccountId(account.accountId);
+  setCurrency(account.currency);
+
+  localStorage.setItem("deriv_token", account.token);
+  localStorage.setItem("deriv_account_id", account.accountId);
+};
 
   const [balance, setBalance] = useState<number | null>(null);
   const [currency, setCurrency] = useState("USD");
@@ -759,6 +955,15 @@ const [pairMeta, setPairMeta] = useState(emptyMeta);
     ws.send(JSON.stringify(payload));
     return true;
   };
+
+  const markDerivSessionReady = () => {
+  authorizedRef.current = true;
+  setConnected(true);
+
+  safeSend({ balance: 1, subscribe: 1 });
+  safeSend({ active_symbols: "brief", product_type: "basic" });
+  subscribeAllPairs(PAIRS);
+};
 
   const resolveLiveSymbol = (pair: Pair) => liveSymbolMapRef.current[pair] ?? pair;
 
@@ -959,9 +1164,14 @@ const resetPairNow = (p: Pair) => {
 
   /* ================= DERIV CONNECTION ================= */
 
-  const connectDeriv = () => {
-    if (!token) return alert("Please enter your Deriv API token");
-    localStorage.setItem("deriv_token", token);
+  const connectDeriv = async () => {
+    const cleanToken = normalizeDerivToken(token);
+const cleanAccountId = derivAccountId.trim();
+
+if (!cleanToken) return alert("Please enter your Deriv API token");
+
+localStorage.setItem("deriv_token", cleanToken);
+if (cleanAccountId) localStorage.setItem("deriv_account_id", cleanAccountId);
 
     try {
       wsRef.current?.close();
@@ -991,12 +1201,12 @@ reqInfoRef.current = {};
 setReinvestProfitsEnabled(false);
 setStake(manualStakeRef.current);
 
-    const ws = new WebSocket(`wss://ws.derivws.com/websockets/v3?app_id=${APP_ID}`);
-    wsRef.current = ws;
+    const ws = new WebSocket(LEGACY_DERIV_WS_URL);
+wsRef.current = ws;
 
-    ws.onopen = () => {
-      safeSend({ authorize: token });
-    };
+ws.onopen = () => {
+  safeSend({ authorize: cleanToken });
+};
 
     ws.onmessage = (e) => {
       const data = JSON.parse(e.data);
@@ -1040,12 +1250,7 @@ if (data.msg_type === "active_symbols" && Array.isArray(data.active_symbols)) {
 }
 
      if (data.msg_type === "authorize") {
-  authorizedRef.current = true;
-  setConnected(true);
-
-  safeSend({ balance: 1, subscribe: 1 });
-  safeSend({ active_symbols: "brief", product_type: "basic" });
-  subscribeAllPairs(PAIRS);
+  markDerivSessionReady();
 }
 
       if (data.msg_type === "balance") {
@@ -1214,8 +1419,7 @@ if (data.msg_type === "proposal") {
     processedProfitTradeIdsRef.current = {};
     setStake(manualStakeRef.current);
     localStorage.clear();
-    router.replace("/");
-    localStorage.removeItem("deriv_token");
+  router.replace("/");
   };
 
   // ============================================================================
@@ -2288,26 +2492,48 @@ const toggleSpiderRandomAuto = async () => {
             </div>
 
             {!connected ? (
-              <div className="flex gap-2">
-                <input
-  type="password"
-  placeholder="Deriv API Token"
-  className="bg-black/40 px-3 py-2 rounded-md border border-white/10"
-  value={token}
-  onChange={(e) => {
-    const v = e.target.value;
-    setToken(v);
-    localStorage.setItem("deriv_token", v); // ✅ makes it available to MT5 dashboard
-  }}
-/>
-                <button
-                  onClick={connectDeriv}
-                  className="bg-indigo-500 px-4 py-2 rounded-md text-sm shadow-[0_0_0_1px_rgba(255,255,255,0.10)]"
-                >
-                  Connect
-                </button>
-              </div>
-            ) : (
+  <div className="flex flex-wrap items-center gap-2">
+    {derivLoginStatus && (
+      <p className="w-full text-xs text-orange-100/90">{derivLoginStatus}</p>
+    )}
+    {oauthAccounts.length === 0 ? (
+      <button
+        onClick={loginWithDeriv}
+        className="bg-orange-500 hover:bg-orange-600 px-4 py-2 rounded-md text-sm font-semibold shadow-[0_0_0_1px_rgba(255,255,255,0.10)]"
+      >
+        Login with Deriv
+      </button>
+    ) : (
+      <>
+        <select
+          className="bg-black/40 px-3 py-2 rounded-md border border-white/10 min-w-[220px]"
+          value={selectedOAuthIndex}
+          onChange={(e) => selectDerivOAuthAccount(Number(e.target.value))}
+        >
+          {oauthAccounts.map((account, index) => (
+            <option key={account.accountId} value={index}>
+              {account.accountId} • {account.currency}
+            </option>
+          ))}
+        </select>
+
+        <button
+          onClick={connectDeriv}
+          className="bg-indigo-500 hover:bg-indigo-600 px-4 py-2 rounded-md text-sm shadow-[0_0_0_1px_rgba(255,255,255,0.10)]"
+        >
+          Connect Selected Account
+        </button>
+
+        <button
+          onClick={loginWithDeriv}
+          className="bg-black/40 hover:bg-black/60 px-4 py-2 rounded-md text-sm border border-white/10"
+        >
+                    Switch / Refresh Deriv Accounts
+        </button>
+      </>
+    )}
+  </div>
+) : (
               <button
                 onClick={disconnect}
                 className="bg-red-500 hover:bg-red-600 px-4 py-2 rounded-md text-sm shadow-[0_0_0_1px_rgba(255,255,255,0.10)]"
