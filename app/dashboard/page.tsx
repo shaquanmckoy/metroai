@@ -4,6 +4,7 @@ import MSpiderPanel from "@/components/dashboard/strategies/MSpiderPanel";
 import { default as RiseFallPanel } from "@/components/dashboard/strategies/RiseFallPanel";
 import SpiderXPanel from "@/components/dashboard/strategies/SpiderXPanel";
 import MetroXPanel from "@/components/dashboard/strategies/MetroXPanel";
+import EvenOddPanel from "@/components/dashboard/strategies/EvenOddPanel";
 import MarketIndicator from "@/components/dashboard/MarketIndicator";
 import DerivChart from "@/components/DerivChart";
 import React, { useEffect, useMemo, useRef, useState } from "react";
@@ -61,6 +62,11 @@ async function buildDerivOAuthUrl() {
   );
   const state = createOAuthRandomString(32);
   const redirectUri = new URL(DERIV_OAUTH_CALLBACK_PATH, window.location.origin).toString();
+  if (!redirectUri.startsWith("https://")) {
+    throw new Error(
+      "Deriv OAuth requires HTTPS. For local testing, run npm run dev:https and open https://localhost:3000."
+    );
+  }
 
   sessionStorage.setItem(DERIV_OAUTH_STATE_KEY, state);
   sessionStorage.setItem(DERIV_OAUTH_VERIFIER_KEY, codeVerifier);
@@ -340,13 +346,15 @@ type TradeType =
   | "Differs"
   | "Over"
   | "Under"
+  | "Even"
+  | "Odd"
   | "Rise"
   | "Fall"
   | "Higher"
   | "Lower";
 
 type Trade = {
- source?: "MetroX" | "Metro" | "SpiderX" | "SpiderX Auto" | "Edshell" | "M-Spider";
+ source?: "MetroX" | "Metro" | "SpiderX" | "SpiderX Auto" | "Edshell" | "M-Spider" | "Even/Odd";
   id: number; // req_id
   contract_id?: number;
 
@@ -391,6 +399,8 @@ const CONTRACT_TYPE_MAP: Record<TradeType, string> = {
   Differs: "DIGITDIFF",
   Over: "DIGITOVER",
   Under: "DIGITUNDER",
+  Even: "DIGITEVEN",
+  Odd: "DIGITODD",
 
   // Rise/Fall
   Rise: "CALL",
@@ -569,12 +579,13 @@ const best: "HIGHER" | "LOWER" = difference >= 0 ? "HIGHER" : "LOWER";
  */
 const STRATEGY_FLAGS_KEY = "strategy_flags";
 
-type StrategyKey = "matches" | "overunder" | "risefall" | "mspider";
+type StrategyKey = "matches" | "overunder" | "evenodd" | "risefall" | "mspider";
 type StrategyFlags = Record<StrategyKey, boolean>;
 
 const DEFAULT_FLAGS: StrategyFlags = {
   matches: true,
   overunder: true,
+  evenodd: true,
   risefall: true,
   mspider: true,
 };
@@ -635,6 +646,7 @@ function readStrategyFlags(): StrategyFlags {
     return {
   matches: typeof parsed.matches === "boolean" ? parsed.matches : true,
   overunder: typeof parsed.overunder === "boolean" ? parsed.overunder : true,
+  evenodd: typeof parsed.evenodd === "boolean" ? parsed.evenodd : true,
   risefall: typeof parsed.risefall === "boolean" ? parsed.risefall : true,
   mspider: typeof parsed.mspider === "boolean" ? parsed.mspider : true,
 };
@@ -735,7 +747,7 @@ useEffect(() => {
 
   const wsRef = useRef<WebSocket | null>(null);
 const authorizedRef = useRef(false);
-const activeStrategyRef = useRef<"matches" | "overunder" | "risefall" | "mspider" | null>(null);
+const activeStrategyRef = useRef<"matches" | "overunder" | "evenodd" | "risefall" | "mspider" | null>(null);
 const selectedPairRef = useRef<Pair>(PAIRS[0]);
 const liveSymbolMapRef = useRef<Record<Pair, string>>(
   Object.fromEntries(PAIRS.map((p) => [p, p])) as Record<Pair, string>
@@ -930,7 +942,7 @@ const selectDerivOAuthAccount = (index: number) => {
 
   const [ticks, setTicks] = useState<number[]>([]);
 
-  const [activeStrategy, setActiveStrategy] = useState<"matches" | "overunder" | "risefall" | "mspider" | null>(null);
+  const [activeStrategy, setActiveStrategy] = useState<"matches" | "overunder" | "evenodd" | "risefall" | "mspider" | null>(null);
 useEffect(() => {
   activeStrategyRef.current = activeStrategy;
 }, [activeStrategy]);
@@ -1413,6 +1425,7 @@ if (!symbol) return;
 if (
   activeStrategyRef.current !== "matches" &&
   activeStrategyRef.current !== "overunder" &&
+  activeStrategyRef.current !== "evenodd" &&
   activeStrategyRef.current !== "risefall" &&
   activeStrategyRef.current !== "mspider" &&
   !metroLoopRef.current
@@ -1717,20 +1730,31 @@ const requestHigherLowerPreview = async ({
   };
 };
 
-const placeTrade = (type: TradeType, durationTicks: number | string) => {
+const placeTrade = (
+  type: TradeType,
+  durationTicks: number | string,
+  customStake?: number
+) => {
+  const tradeStake = customStake ?? stake;
   
   const needsDigit =
     type === "Matches" || type === "Differs" || type === "Over" || type === "Under";
 
   if (needsDigit && selectedDigit === null) return alert("Select a digit first");
-  if (!stake || stake <= 0) return alert("Enter a stake amount");
+  if (!Number.isFinite(tradeStake) || tradeStake <= 0) return alert("Enter a stake amount");
   if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return alert("WebSocket not connected yet");
   if (!authorizedRef.current) return alert("Not authorized yet");
 
   const req_id = newReqId();
 
   const src: Trade["source"] =
-    activeStrategy === "overunder" ? "SpiderX Auto" : activeStrategy === "risefall" ? "Metro" : "MetroX";
+    activeStrategy === "overunder"
+      ? "SpiderX Auto"
+      : activeStrategy === "evenodd"
+        ? "Even/Odd"
+        : activeStrategy === "risefall"
+          ? "Metro"
+          : "MetroX";
 
   const digitForTrade = needsDigit ? (selectedDigit as number) : 0;
   const parsedDuration =
@@ -1748,7 +1772,7 @@ const durationUnit =
     symbol: selectedPair,
     digit: digitForTrade,
     type,
-    stake,
+    stake: tradeStake,
     durationTicks: durationUnit === "t" ? parsedDuration : 0,
     result: "Pending",
     createdAt: Date.now(),
@@ -1757,11 +1781,16 @@ const durationUnit =
 
   setTradeHistory((prev) => [trade, ...prev]);
 
-  reqInfoRef.current[req_id] = { symbol: selectedPair, digit: digitForTrade, type, stake };
+  reqInfoRef.current[req_id] = {
+    symbol: selectedPair,
+    digit: digitForTrade,
+    type,
+    stake: tradeStake,
+  };
 
   const payload: any = {
     proposal: 1,
-    amount: stake,
+    amount: tradeStake,
     basis: "stake",
     contract_type: getContractType(type, rfAllowEquals),
     currency: currency || "USD",
@@ -2520,6 +2549,7 @@ const toggleSpiderRandomAuto = async () => {
   if (isAdmin) return;
   if (activeStrategy === "matches" && !isStrategyEnabledForViewer("matches")) setActiveStrategy(null);
   if (activeStrategy === "overunder" && !isStrategyEnabledForViewer("overunder")) setActiveStrategy(null);
+  if (activeStrategy === "evenodd" && !isStrategyEnabledForViewer("evenodd")) setActiveStrategy(null);
   if (activeStrategy === "risefall" && !isStrategyEnabledForViewer("risefall")) setActiveStrategy(null);
   if (activeStrategy === "mspider" && !isStrategyEnabledForViewer("mspider")) setActiveStrategy(null);
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -2644,7 +2674,7 @@ const toggleSpiderRandomAuto = async () => {
   <div className="flex flex-wrap items-center gap-2">
     {!APP_ID && (
       <p className="w-full text-xs text-red-200">
-        Deriv OAuth is not configured. Add NEXT_PUBLIC_DERIV_APP_ID to this deployment.
+        Deriv OAuth is not configured. Add NEXT_PUBLIC_DERIV_APP_ID to .env.local for local testing or to your deployment environment online.
       </p>
     )}
     {derivLoginStatus && (
@@ -2811,6 +2841,15 @@ const toggleSpiderRandomAuto = async () => {
   />
 )}
 
+  {isStrategyEnabledForViewer("evenodd") && (
+  <StrategyRow
+    title="Even/Odd"
+    description="Even/Odd strategy with profit and loss limits"
+    active={activeStrategy === "evenodd"}
+    onToggle={() => setActiveStrategy(activeStrategy === "evenodd" ? null : "evenodd")}
+  />
+)}
+
   {isStrategyEnabledForViewer("risefall") && (
   <StrategyRow
     title="Rise/Fall"
@@ -2934,6 +2973,37 @@ const toggleSpiderRandomAuto = async () => {
     onClearHistory={() => setTradeHistory([])}
   />
 </div>
+  </div>
+)}
+{activeStrategy === "evenodd" && isStrategyEnabledForViewer("evenodd") && (
+  <div className="bg-[#13233d] flex min-h-[520px] flex-col">
+    <EvenOddPanel
+      indexGroups={INDEX_GROUPS}
+      ticks={ticks}
+      selectedPair={selectedPair}
+      setSelectedPair={(p: Pair) => {
+        resetPairNow(p);
+        setSelectedPair(p);
+      }}
+      stake={stake}
+      setStake={handleStakeChange}
+      currency={currency}
+      connected={connected}
+      tradeHistory={tradeHistory}
+      onPlaceTrade={(type: "Even" | "Odd", duration: number, tradeStake?: number) =>
+        placeTrade(type, duration, tradeStake)
+      }
+      tradeHistoryPanel={
+        <StrategyTradeHistoryTab
+          title="Even/Odd Trade History"
+          trades={tradeHistory.filter((trade) => trade.source === "Even/Odd")}
+          currency={currency}
+          onClearHistory={() =>
+            setTradeHistory((previous) => previous.filter((trade) => trade.source !== "Even/Odd"))
+          }
+        />
+      }
+    />
   </div>
 )}
 {activeStrategy === "risefall" && isStrategyEnabledForViewer("risefall") && (
@@ -3397,6 +3467,8 @@ function TradeHistoryMetroLike({
   if (t.type === "Matches") return "MATCHES";
   if (t.type === "Over") return "OVER";
   if (t.type === "Under") return "UNDER";
+  if (t.type === "Even") return "EVEN";
+  if (t.type === "Odd") return "ODD";
 
   return "MetroX";
 };

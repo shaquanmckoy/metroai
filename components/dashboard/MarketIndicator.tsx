@@ -68,7 +68,7 @@ export default function MarketIndicator({
   pairDigitsRef,
   pairQuotesRef,
 }: {
-  activeStrategy: "matches" | "overunder" | "risefall" | "mspider" | null;
+  activeStrategy: "matches" | "overunder" | "evenodd" | "risefall" | "mspider" | null;
   selectedPair: Pair;
   pairDigitsRef: React.MutableRefObject<Record<Pair, number[]>>;
   pairQuotesRef: React.MutableRefObject<Record<Pair, number[]>>;
@@ -355,6 +355,8 @@ const chiSquareUniform = (f: number[], n: number) => {
     ? "MetroX"
     : activeStrategy === "overunder"
     ? "SpiderX"
+    : activeStrategy === "evenodd"
+    ? "Even/Odd"
     : activeStrategy === "risefall"
     ? "Rise/Fall"
     : activeStrategy === "mspider"
@@ -569,7 +571,7 @@ if (riskLevel === "HIGH" && !sustainedHigh) {
 
   // ===================== BETTER INDEX RECOMMENDATION =====================
   const indexTip = (() => {
-    if (!activeStrategy) return "Pick MetroX or SpiderX to get live edge-based recommendations.";
+    if (!activeStrategy) return "Pick a strategy to get live market information.";
 
     if (activeStrategy === "matches") {
       const edgeTxt =
@@ -582,6 +584,20 @@ if (riskLevel === "HIGH" && !sustainedHigh) {
       if (riskLevel === "HIGH") return `MetroX: stay on R_25 / R_50. Avoid 1HZ + Jump during HIGH risk.\n${edgeTxt}`;
       if (riskLevel === "MEDIUM") return `MetroX: R_25 / R_50 best. Use 1HZ only if you reduce stake + slow down.\n${edgeTxt}`;
       return `MetroX: R_25 / R_50 stable. 1HZ only if you can control entries.\n${edgeTxt}`;
+    }
+
+    if (activeStrategy === "evenodd") {
+      const evenPct = ready20 ? p20[0] + p20[2] + p20[4] + p20[6] + p20[8] : 0;
+      const oddPct = ready20 ? 100 - evenPct : 0;
+      const splitText = ready20
+        ? `Last 20 split: Even ${evenPct.toFixed(1)}% • Odd ${oddPct.toFixed(1)}%.`
+        : "Collecting 20 digits for the live Even/Odd split…";
+
+      if (riskLevel === "HIGH") {
+        return `Even/Odd: avoid Auto Trade until the risk reading settles. ${splitText}`;
+      }
+
+      return `Even/Odd: ${splitText} Recent frequency describes past ticks and does not predict the next digit.`;
     }
 
     if (activeStrategy === "risefall") {

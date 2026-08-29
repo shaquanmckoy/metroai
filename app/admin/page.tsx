@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 type Flags = {
   matches: boolean;
   overunder: boolean;
+  evenodd: boolean;
   risefall: boolean;
   mspider: boolean;
 };
@@ -13,6 +14,7 @@ type Flags = {
 const DEFAULT_FLAGS: Flags = {
   matches: true,
   overunder: true,
+  evenodd: true,
   risefall: true,
   mspider: true,
 };
@@ -52,6 +54,7 @@ const DEFAULT_UI_FLAGS: UIFlags = {
 const STRATEGY_ITEMS = [
   ["matches", "MetroX (Matches/Differs)"],
   ["overunder", "Over / Under"],
+  ["evenodd", "Even / Odd"],
   ["risefall", "Rise / Fall"],
   ["mspider", "M-Spider (Higher/Lower)"],
 ] as const;
@@ -150,6 +153,7 @@ export default function AdminPage() {
         const f: Flags = {
           matches: typeof data.flags?.matches === "boolean" ? data.flags.matches : true,
           overunder: typeof data.flags?.overunder === "boolean" ? data.flags.overunder : true,
+          evenodd: typeof data.flags?.evenodd === "boolean" ? data.flags.evenodd : true,
           risefall: typeof data.flags?.risefall === "boolean" ? data.flags.risefall : true,
           mspider: typeof data.flags?.mspider === "boolean" ? data.flags.mspider : true,
         };
@@ -175,6 +179,7 @@ export default function AdminPage() {
       const newFlags: Flags = {
         matches: typeof data.flags?.matches === "boolean" ? data.flags.matches : flags.matches,
         overunder: typeof data.flags?.overunder === "boolean" ? data.flags.overunder : flags.overunder,
+        evenodd: typeof data.flags?.evenodd === "boolean" ? data.flags.evenodd : flags.evenodd,
         risefall: typeof data.flags?.risefall === "boolean" ? data.flags.risefall : flags.risefall,
         mspider: typeof data.flags?.mspider === "boolean" ? data.flags.mspider : flags.mspider,
       };

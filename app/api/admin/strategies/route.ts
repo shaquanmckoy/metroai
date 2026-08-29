@@ -14,6 +14,7 @@ const KEY = "strategy_flags";
 const DEFAULT_FLAGS = {
   matches: true,
   overunder: true,
+  evenodd: true,
   risefall: true,
   mspider: true,
 };
@@ -34,6 +35,7 @@ export async function GET() {
     const flags = {
       matches: typeof value.matches === "boolean" ? value.matches : true,
       overunder: typeof value.overunder === "boolean" ? value.overunder : true,
+      evenodd: typeof value.evenodd === "boolean" ? value.evenodd : true,
       risefall: typeof value.risefall === "boolean" ? value.risefall : true,
       mspider: typeof value.mspider === "boolean" ? value.mspider : true,
     };
@@ -57,6 +59,7 @@ export async function POST(req: Request) {
     const flags = {
       matches: typeof src?.matches === "boolean" ? src.matches : true,
       overunder: typeof src?.overunder === "boolean" ? src.overunder : true,
+      evenodd: typeof src?.evenodd === "boolean" ? src.evenodd : true,
       risefall: typeof src?.risefall === "boolean" ? src.risefall : true,
       mspider: typeof src?.mspider === "boolean" ? src.mspider : true,
     };
