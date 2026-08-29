@@ -4,7 +4,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { INDEX_GROUPS, PAIRS, type Pair } from "../page";
 
-const APP_ID = 1089;
+const DERIV_PUBLIC_WS_URL = "wss://api.derivws.com/trading/v1/options/ws/public";
 
 type MarketBias = "BUY" | "SELL" | "WAIT";
 type MarketStructure = "Uptrend" | "Downtrend" | "Range" | "Unclear";
@@ -511,8 +511,6 @@ function buildRecommendationFromCandles(candles: Candle[], tfSec: number) {
 export default function ChartDashboardPage() {
   const router = useRouter();
 
-  // Deriv token (your existing)
-  const [token, setToken] = useState("");
   const [connected, setConnected] = useState(false);
 
   const [selectedPair, setSelectedPair] = useState<Pair>(PAIRS[0]);
@@ -544,8 +542,6 @@ export default function ChartDashboardPage() {
   const lastTradeAtRef = useRef<number>(0);
 
   useEffect(() => {
-    setToken(localStorage.getItem("deriv_token") || "");
-
     // MT5 creds local for now (you can move server-side later)
     setMt5Token(localStorage.getItem("mt5_metaapi_token") || "");
     setMt5AccountId(localStorage.getItem("mt5_metaapi_account_id") || "");
@@ -554,12 +550,6 @@ export default function ChartDashboardPage() {
   }, []);
 
   const connectDeriv = () => {
-    const t = token || localStorage.getItem("deriv_token") || "";
-    if (!t) return alert("Enter your Deriv API token on the main dashboard first.");
-
-    localStorage.setItem("deriv_token", t);
-    setToken(t);
-
     try {
       wsRef.current?.close();
     } catch {}
@@ -569,10 +559,13 @@ export default function ChartDashboardPage() {
     setCandles([]);
     setConnected(false);
 
-    const ws = new WebSocket(`wss://ws.derivws.com/websockets/v3?app_id=${APP_ID}`);
+    const ws = new WebSocket(DERIV_PUBLIC_WS_URL);
     wsRef.current = ws;
 
-    ws.onopen = () => ws.send(JSON.stringify({ authorize: t }));
+    ws.onopen = () => {
+      setConnected(true);
+      ws.send(JSON.stringify({ ticks: selectedPair, subscribe: 1 }));
+    };
 
     ws.onmessage = (e) => {
       const data = JSON.parse(e.data);
@@ -580,12 +573,8 @@ export default function ChartDashboardPage() {
         alert(data.error.message);
         return;
       }
-      if (data.msg_type === "authorize") {
-        setConnected(true);
-        ws.send(JSON.stringify({ ticks: selectedPair, subscribe: 1 }));
-      }
       if (data.msg_type === "tick" && data.tick?.quote !== undefined) {
-        const sym = data.tick.symbol as Pair;
+        const sym = (data.tick.underlying_symbol || data.tick.symbol) as Pair;
         if (sym !== selectedPair) return;
 
         const q = Number(data.tick.quote);
@@ -784,25 +773,13 @@ export default function ChartDashboardPage() {
             <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
               <div>
                 <p className="font-semibold text-white/85">Deriv Price Feed</p>
-                <p className="text-xs text-white/55">Uses your saved Deriv token (localStorage.deriv_token).</p>
+                <p className="text-xs text-white/55">Uses Deriv&apos;s public live market feed.</p>
               </div>
 
               {!connected ? (
-                <div className="flex gap-2 w-full md:w-auto">
-                  <input
-                    type="password"
-                    placeholder="Deriv API Token"
-                    value={token}
-                    onChange={(e) => {
-                      setToken(e.target.value);
-                      localStorage.setItem("deriv_token", e.target.value);
-                    }}
-                    className="flex-1 md:w-[320px] bg-black/40 px-3 py-2 rounded-md border border-white/10"
-                  />
-                  <button onClick={connectDeriv} className="bg-indigo-500 px-4 py-2 rounded-md text-sm">
-                    Connect
-                  </button>
-                </div>
+                <button onClick={connectDeriv} className="bg-indigo-500 px-4 py-2 rounded-md text-sm">
+                  Connect Price Feed
+                </button>
               ) : (
                 <button onClick={disconnectDeriv} className="bg-red-500 hover:bg-red-600 px-4 py-2 rounded-md text-sm">
                   Disconnect
