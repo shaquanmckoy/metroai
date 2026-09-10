@@ -2,6 +2,13 @@
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import type { Pair } from "@/app/dashboard/page";
+import {
+  analyzeEvenOddSignal,
+  buildAdaptiveRecoveryLadder,
+  roundStakeUp,
+  type EvenOddDirection,
+  type SignalProfile,
+} from "@/components/dashboard/strategies/even-odd-engine";
 
 type PairOption = { code: string; label: string };
 
@@ -13,9 +20,13 @@ type PairGroups = {
 type EvenOddTrade = {
   id: number;
   source?: string;
+  symbol?: Pair;
   type?: string;
   result?: "Win" | "Loss" | "Pending";
+  stake?: number;
+  durationTicks?: number;
   profit?: number;
+  expectedPayout?: number;
   createdAt?: number;
 };
 
@@ -31,9 +42,22 @@ type EvenOddPanelProps = {
   tradeHistory: EvenOddTrade[];
   tradeHistoryPanel: React.ReactNode;
   onPlaceTrade: (type: "Even" | "Odd", duration: number, stake?: number) => void;
+  requestPayoutPreview: (options: {
+    direction: EvenOddDirection;
+    durationTicks: number;
+    customStake: number;
+  }) => Promise<{ payout: number; askPrice: number; profitRate: number }>;
 };
 
 const AUTO_TRADE_DELAY_MS = 750;
+const PRESET_RECOVERY_STEPS = 2;
+
+const MARTINGALE_PRESETS = [
+  { id: "starter", label: "Starter", baseStake: 0.35, profitTarget: 1 },
+  { id: "standard", label: "Standard", baseStake: 1, profitTarget: 2 },
+] as const;
+
+type MartingalePreset = (typeof MARTINGALE_PRESETS)[number];
 
 export default function EvenOddPanel({
   indexGroups,
@@ -47,12 +71,16 @@ export default function EvenOddPanel({
   tradeHistory,
   tradeHistoryPanel,
   onPlaceTrade,
+  requestPayoutPreview,
 }: EvenOddPanelProps) {
-  const [direction, setDirection] = useState<"Even" | "Odd">("Even");
+  const [direction, setDirection] = useState<EvenOddDirection>("Even");
+  const [autoMode, setAutoMode] = useState<"smart" | "fixed">("smart");
+  const [signalProfile, setSignalProfile] = useState<SignalProfile>("balanced");
   const [duration, setDuration] = useState(1);
   const [profitTarget, setProfitTarget] = useState("10");
   const [lossLimit, setLossLimit] = useState("10");
   const [martingaleEnabled, setMartingaleEnabled] = useState(false);
+  const [recoveryMode, setRecoveryMode] = useState<"adaptive" | "multiplier">("adaptive");
   const [martingaleMultiplier, setMartingaleMultiplier] = useState("2");
   const [maxRecoverySteps, setMaxRecoverySteps] = useState("3");
   const [maxMartingaleStake, setMaxMartingaleStake] = useState("25");
@@ -60,15 +88,36 @@ export default function EvenOddPanel({
   const [sessionStartedAt, setSessionStartedAt] = useState<number | null>(null);
   const [sessionBaseStake, setSessionBaseStake] = useState<number | null>(null);
   const [autoStatus, setAutoStatus] = useState("Auto Trade is off.");
+  const [selectedPresetId, setSelectedPresetId] = useState<MartingalePreset["id"] | null>(null);
+  const [presetLoading, setPresetLoading] = useState(false);
+  const [presetStatus, setPresetStatus] = useState(
+    "Choose a preset to calculate its limits from the current Deriv payout."
+  );
+  const [payoutPreview, setPayoutPreview] = useState<{
+    pair: Pair;
+    duration: number;
+    profitRate: number;
+    evenProfitRate: number;
+    oddProfitRate: number;
+  } | null>(null);
+  const [lastAutoTradeTickDisplay, setLastAutoTradeTickDisplay] = useState(-1);
+  const [resumeAfterTickDisplay, setResumeAfterTickDisplay] = useState(0);
   const autoTimerRef = useRef<number | null>(null);
   const autoRunningRef = useRef(false);
   const placeTradeRef = useRef(onPlaceTrade);
+  const lastAutoTradeTickRef = useRef(-1);
+  const lastHandledSettlementRef = useRef<number | null>(null);
+  const resumeAfterTickRef = useRef(0);
 
   const recentDigits = ticks.slice(-100);
   const last20 = ticks.slice(-20);
   const evenCount = recentDigits.filter((digit) => digit % 2 === 0).length;
   const evenPercent = recentDigits.length ? (evenCount / recentDigits.length) * 100 : 0;
   const oddPercent = recentDigits.length ? 100 - evenPercent : 0;
+  const smartSignal = useMemo(
+    () => analyzeEvenOddSignal(ticks, signalProfile),
+    [signalProfile, ticks]
+  );
 
   const evenOddTrades = useMemo(
     () => tradeHistory.filter((trade) => trade.source === "Even/Odd"),
@@ -100,6 +149,7 @@ export default function EvenOddPanel({
         .sort((a, b) => Number(a.createdAt ?? 0) - Number(b.createdAt ?? 0)),
     [sessionTrades]
   );
+  const latestSettledTrade = settledSessionTrades[settledSessionTrades.length - 1];
   const consecutiveLosses = (() => {
     let losses = 0;
     for (let index = settledSessionTrades.length - 1; index >= 0; index--) {
@@ -108,28 +158,91 @@ export default function EvenOddPanel({
     }
     return losses;
   })();
+  const trailingLossAmount = (() => {
+    let total = 0;
+    for (let index = settledSessionTrades.length - 1; index >= 0; index--) {
+      const trade = settledSessionTrades[index];
+      if (trade.result !== "Loss") break;
+      const recordedLoss = Math.abs(Math.min(0, Number(trade.profit ?? 0)));
+      total += recordedLoss > 0 ? recordedLoss : Number(trade.stake ?? 0);
+    }
+    return total;
+  })();
+  const payoutRateSamples = evenOddTrades
+    .filter(
+      (trade) =>
+        trade.symbol === selectedPair &&
+        trade.durationTicks === duration &&
+        Number(trade.stake ?? 0) > 0 &&
+        Number(trade.expectedPayout ?? 0) > Number(trade.stake ?? 0)
+    )
+    .sort((a, b) => Number(b.createdAt ?? 0) - Number(a.createdAt ?? 0))
+    .slice(0, 5)
+    .map(
+      (trade) =>
+        (Number(trade.expectedPayout) - Number(trade.stake)) / Number(trade.stake)
+    )
+    .filter((rate) => Number.isFinite(rate) && rate > 0);
+  const currentPreviewRate =
+    payoutPreview?.pair === selectedPair && payoutPreview.duration === duration
+      ? payoutPreview.profitRate
+      : null;
+  const presetRequiresRefresh =
+    selectedPresetId !== null && connected && currentPreviewRate === null;
+  const estimatedProfitRate = (() => {
+    if (!payoutRateSamples.length) return 0.9;
+    const sorted = [...payoutRateSamples].sort((a, b) => a - b);
+    return sorted[Math.floor(sorted.length / 2)];
+  })();
+  const recoveryProfitRate = payoutRateSamples.length
+    ? estimatedProfitRate
+    : currentPreviewRate ?? estimatedProfitRate;
   const martingaleStep = martingaleEnabled ? consecutiveLosses : 0;
-  const nextAutoStake = Number(
-    (baseAutoStake * Math.pow(martingaleMultiplierValue, martingaleStep)).toFixed(2)
-  );
+  const adaptiveRecoveryStake =
+    martingaleStep > 0
+      ? roundStakeUp(
+          (trailingLossAmount + baseAutoStake * recoveryProfitRate) / recoveryProfitRate
+        )
+      : roundStakeUp(baseAutoStake);
+  const nextAutoStake = martingaleEnabled
+    ? recoveryMode === "adaptive"
+      ? adaptiveRecoveryStake
+      : roundStakeUp(baseAutoStake * Math.pow(martingaleMultiplierValue, martingaleStep))
+    : roundStakeUp(baseAutoStake);
   const remainingLossCapacity = lossLimitValue + sessionNet;
   const martingaleStepsExceeded =
     martingaleEnabled && consecutiveLosses > maxRecoveryStepsValue;
   const martingaleStakeExceeded =
     martingaleEnabled && nextAutoStake > maxMartingaleStakeValue;
   const lossLimitWouldBeExceeded =
-    Number.isFinite(nextAutoStake) && nextAutoStake > Math.max(0, remainingLossCapacity);
-  const projectedMartingaleStakes =
-    martingaleEnabled &&
-    Number.isFinite(martingaleMultiplierValue) &&
-    martingaleMultiplierValue > 1 &&
-    Number.isInteger(maxRecoveryStepsValue) &&
-    maxRecoveryStepsValue >= 1 &&
-    maxRecoveryStepsValue <= 10
-      ? Array.from({ length: maxRecoveryStepsValue + 1 }, (_, step) =>
-          Number((stake * Math.pow(martingaleMultiplierValue, step)).toFixed(2))
-        )
-      : [];
+    Number.isFinite(nextAutoStake) &&
+    nextAutoStake > Math.max(0, remainingLossCapacity) + 0.005;
+  const projectedMartingaleStakes = (() => {
+    if (
+      !martingaleEnabled ||
+      !Number.isInteger(maxRecoveryStepsValue) ||
+      maxRecoveryStepsValue < 1 ||
+      maxRecoveryStepsValue > 10
+    ) {
+      return [];
+    }
+    if (
+      recoveryMode === "multiplier" &&
+      (!Number.isFinite(martingaleMultiplierValue) || martingaleMultiplierValue <= 1)
+    ) {
+      return [];
+    }
+
+    if (recoveryMode === "adaptive") {
+      return buildAdaptiveRecoveryLadder(stake, recoveryProfitRate, maxRecoveryStepsValue);
+    }
+
+    return Array.from({ length: maxRecoveryStepsValue + 1 }, (_, step) =>
+      roundStakeUp(stake * Math.pow(martingaleMultiplierValue, step))
+    );
+  })();
+  const autoDirection = autoMode === "smart" ? smartSignal.direction : direction;
+  const recoveryPauseRemaining = Math.max(0, resumeAfterTickDisplay - ticks.length);
 
   useEffect(() => {
     autoRunningRef.current = autoRunning;
@@ -141,6 +254,16 @@ export default function EvenOddPanel({
 
   useEffect(() => {
     if (!autoRunning || sessionStartedAt === null) return;
+
+    if (
+      latestSettledTrade &&
+      latestSettledTrade.id !== lastHandledSettlementRef.current
+    ) {
+      lastHandledSettlementRef.current = latestSettledTrade.id;
+      resumeAfterTickRef.current =
+        latestSettledTrade.result === "Loss" ? ticks.length + 2 : ticks.length;
+      window.setTimeout(() => setResumeAfterTickDisplay(resumeAfterTickRef.current), 0);
+    }
 
     if (!connected) {
       const stopTimer = window.setTimeout(() => {
@@ -197,11 +320,16 @@ export default function EvenOddPanel({
     }
 
     if (hasPendingTrade || autoTimerRef.current !== null) return;
+    if (ticks.length < resumeAfterTickRef.current) return;
+    if (ticks.length <= lastAutoTradeTickRef.current) return;
+    if (autoMode === "smart" && !smartSignal.ready) return;
 
     autoTimerRef.current = window.setTimeout(() => {
       autoTimerRef.current = null;
       if (!autoRunningRef.current) return;
-      placeTradeRef.current(direction, duration, nextAutoStake);
+      lastAutoTradeTickRef.current = ticks.length;
+      setLastAutoTradeTickDisplay(ticks.length);
+      placeTradeRef.current(autoDirection, duration, nextAutoStake);
     }, AUTO_TRADE_DELAY_MS);
 
     return () => {
@@ -212,12 +340,14 @@ export default function EvenOddPanel({
     };
   }, [
     autoRunning,
+    autoDirection,
+    autoMode,
     connected,
     currency,
     consecutiveLosses,
-    direction,
     duration,
     hasPendingTrade,
+    latestSettledTrade,
     lossLimitValue,
     lossLimitWouldBeExceeded,
     martingaleStakeExceeded,
@@ -226,6 +356,8 @@ export default function EvenOddPanel({
     profitTargetValue,
     sessionNet,
     sessionStartedAt,
+    smartSignal.ready,
+    ticks.length,
   ]);
 
   useEffect(() => {
@@ -235,8 +367,107 @@ export default function EvenOddPanel({
     };
   }, []);
 
+  const configurePreset = (
+    preset: MartingalePreset,
+    profitRate: number,
+    status: string
+  ) => {
+    const ladder = buildAdaptiveRecoveryLadder(
+      preset.baseStake,
+      profitRate,
+      PRESET_RECOVERY_STEPS
+    );
+    const totalExposure = roundStakeUp(
+      ladder.reduce((total, ladderStake) => total + ladderStake, 0)
+    );
+
+    setStake(preset.baseStake);
+    setProfitTarget(String(preset.profitTarget));
+    setLossLimit(totalExposure.toFixed(2));
+    setMartingaleEnabled(true);
+    setRecoveryMode("adaptive");
+    setMaxRecoverySteps(String(PRESET_RECOVERY_STEPS));
+    setMaxMartingaleStake(String(ladder[ladder.length - 1] ?? preset.baseStake));
+    setSelectedPresetId(preset.id);
+    setPresetStatus(status);
+  };
+
+  const applyMartingalePreset = async (preset: MartingalePreset) => {
+    if (autoRunning) return;
+    if (hasAnyPendingEvenOddTrade) {
+      return alert("Wait for the current Even/Odd trade to settle");
+    }
+
+    setPresetLoading(true);
+
+    try {
+      if (!connected) {
+        setPayoutPreview(null);
+        configurePreset(
+          preset,
+          0.9,
+          "Preset applied with a temporary 90% return estimate. Connect Deriv and re-apply it to use live payouts."
+        );
+        return;
+      }
+
+      const [evenPreview, oddPreview] = await Promise.all([
+        requestPayoutPreview({
+          direction: "Even",
+          durationTicks: duration,
+          customStake: preset.baseStake,
+        }),
+        requestPayoutPreview({
+          direction: "Odd",
+          durationTicks: duration,
+          customStake: preset.baseStake,
+        }),
+      ]);
+      const validRates = [evenPreview.profitRate, oddPreview.profitRate].filter(
+        (rate) => Number.isFinite(rate) && rate > 0
+      );
+
+      if (validRates.length !== 2) {
+        throw new Error("Deriv did not return usable Even and Odd payouts.");
+      }
+
+      const conservativeProfitRate = Math.min(...validRates);
+      setPayoutPreview({
+        pair: selectedPair,
+        duration,
+        profitRate: conservativeProfitRate,
+        evenProfitRate: evenPreview.profitRate,
+        oddProfitRate: oddPreview.profitRate,
+      });
+      configurePreset(
+        preset,
+        conservativeProfitRate,
+        `Live payout loaded: Even ${(evenPreview.profitRate * 100).toFixed(1)}%, Odd ${(oddPreview.profitRate * 100).toFixed(1)}%. The ladder uses the lower return.`
+      );
+    } catch (error) {
+      setPayoutPreview(null);
+      configurePreset(
+        preset,
+        0.9,
+        `${error instanceof Error ? error.message : "Could not load the live payout."} Preset applied with a temporary 90% return estimate; re-apply before trading.`
+      );
+    } finally {
+      setPresetLoading(false);
+    }
+  };
+
+  const markPresetCustomized = () => {
+    setSelectedPresetId(null);
+    setPresetStatus("Custom Martingale settings are active. Choose a preset to restore its calculated limits.");
+  };
+
   const startAutoTrade = () => {
     if (!connected) return alert("Connect your Deriv account first");
+    if (presetRequiresRefresh) {
+      return alert(
+        "Re-apply the selected preset to refresh its live Deriv payout for this index and duration."
+      );
+    }
     if (!Number.isFinite(stake) || stake <= 0) return alert("Enter a valid stake amount");
     if (!Number.isFinite(profitTargetValue) || profitTargetValue <= 0) {
       return alert("Enter a profit target greater than 0");
@@ -248,7 +479,10 @@ export default function EvenOddPanel({
       return alert("Your starting stake must not be greater than your loss limit");
     }
     if (martingaleEnabled) {
-      if (!Number.isFinite(martingaleMultiplierValue) || martingaleMultiplierValue <= 1) {
+      if (
+        recoveryMode === "multiplier" &&
+        (!Number.isFinite(martingaleMultiplierValue) || martingaleMultiplierValue <= 1)
+      ) {
         return alert("Enter a Martingale multiplier greater than 1");
       }
       if (
@@ -266,7 +500,16 @@ export default function EvenOddPanel({
 
     setSessionStartedAt(Date.now());
     setSessionBaseStake(stake);
-    setAutoStatus(`Auto Trade started with ${direction}.`);
+    lastAutoTradeTickRef.current = ticks.length;
+    setLastAutoTradeTickDisplay(ticks.length);
+    lastHandledSettlementRef.current = null;
+    resumeAfterTickRef.current = ticks.length;
+    setResumeAfterTickDisplay(ticks.length);
+    setAutoStatus(
+      autoMode === "smart"
+        ? "Smart Auto started. Waiting for a fresh qualified signal."
+        : `Fixed Auto started with ${direction}.`
+    );
     setAutoRunning(true);
   };
 
@@ -290,9 +533,15 @@ export default function EvenOddPanel({
   const displayedAutoStatus = autoRunning
     ? hasPendingTrade
       ? "Waiting for the current contract to settle..."
-      : `Preparing ${direction.toLowerCase()} with ${nextAutoStake.toFixed(2)} ${currency}${
-          martingaleEnabled ? ` • Martingale step ${martingaleStep}/${maxRecoveryStepsValue}` : ""
-        }...`
+      : recoveryPauseRemaining > 0
+        ? `Recovery cooldown: waiting ${recoveryPauseRemaining} more tick${recoveryPauseRemaining === 1 ? "" : "s"}.`
+        : autoMode === "smart" && !smartSignal.ready
+          ? `Scanning: ${smartSignal.reason}`
+          : ticks.length <= lastAutoTradeTickDisplay
+            ? "Waiting for a fresh tick before the next entry..."
+            : `Preparing ${autoDirection.toLowerCase()} with ${nextAutoStake.toFixed(2)} ${currency}${
+                martingaleEnabled ? ` • Recovery step ${martingaleStep}/${maxRecoveryStepsValue}` : ""
+              }...`
     : autoStatus;
 
   return (
@@ -301,7 +550,7 @@ export default function EvenOddPanel({
         <div>
           <p className="text-2xl font-bold text-white">Even/Odd Strategy</p>
           <p className="mt-1 max-w-2xl text-sm text-white/55">
-            Trade one contract at a time and stop automatically when your session reaches the profit target or loss limit.
+            Qualify entries with walk-forward signal checks, trade one contract at a time, and keep recovery exposure inside hard limits.
           </p>
         </div>
 
@@ -324,7 +573,7 @@ export default function EvenOddPanel({
         </div>
       </div>
 
-      <div className="grid gap-4 md:grid-cols-3">
+      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
         <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
           <p className="text-xs uppercase tracking-[0.18em] text-white/45">Recent Even</p>
           <p className="mt-2 text-2xl font-bold text-sky-300">{evenPercent.toFixed(1)}%</p>
@@ -332,6 +581,15 @@ export default function EvenOddPanel({
         <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
           <p className="text-xs uppercase tracking-[0.18em] text-white/45">Recent Odd</p>
           <p className="mt-2 text-2xl font-bold text-purple-300">{oddPercent.toFixed(1)}%</p>
+        </div>
+        <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
+          <p className="text-xs uppercase tracking-[0.18em] text-white/45">Smart Signal</p>
+          <p className={`mt-2 text-2xl font-bold ${smartSignal.ready ? "text-emerald-300" : "text-amber-200"}`}>
+            {smartSignal.ready ? smartSignal.direction : "Wait"}
+          </p>
+          <p className="mt-1 text-xs text-white/45">
+            {(smartSignal.estimatedProbability * 100).toFixed(1)}% model estimate
+          </p>
         </div>
         <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
           <p className="text-xs uppercase tracking-[0.18em] text-white/45">Auto Session P/L</p>
@@ -343,6 +601,63 @@ export default function EvenOddPanel({
       </div>
 
       <div className="rounded-2xl border border-white/10 bg-black/20 p-5">
+        <div className="mb-5 rounded-2xl border border-cyan-400/20 bg-cyan-500/[0.06] p-4">
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+            <div>
+              <p className="font-semibold text-cyan-100">Payout-aware Martingale Presets</p>
+              <p className="mt-1 max-w-3xl text-xs leading-relaxed text-white/55">
+                Each preset uses two recovery steps. When Deriv is connected, the app checks both live Even and Odd proposals and sizes the ladder with the lower return.
+              </p>
+            </div>
+            <span className="rounded-full border border-cyan-400/20 bg-cyan-500/10 px-3 py-1 text-[11px] font-bold text-cyan-100">
+              {currentPreviewRate !== null
+                ? "LIVE PAYOUT"
+                : presetRequiresRefresh
+                  ? "REFRESH REQUIRED"
+                  : "ESTIMATE UNTIL CONNECTED"}
+            </span>
+          </div>
+
+          <div className="mt-4 grid gap-3 md:grid-cols-2">
+            {MARTINGALE_PRESETS.map((preset) => (
+              <button
+                key={preset.id}
+                type="button"
+                disabled={autoRunning || presetLoading}
+                onClick={() => void applyMartingalePreset(preset)}
+                className={`rounded-xl border p-4 text-left transition disabled:cursor-wait disabled:opacity-60 ${
+                  selectedPresetId === preset.id
+                    ? "border-cyan-300/45 bg-cyan-400/15"
+                    : "border-white/10 bg-black/20 hover:border-cyan-400/30 hover:bg-cyan-500/[0.07]"
+                }`}
+              >
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <p className="text-xs uppercase tracking-[0.16em] text-white/45">{preset.label}</p>
+                    <p className="mt-1 text-lg font-bold text-white">
+                      {preset.baseStake.toFixed(2)} {currency} start
+                    </p>
+                  </div>
+                  <span className="rounded-lg bg-emerald-500/10 px-3 py-2 text-sm font-bold text-emerald-200">
+                    {preset.profitTarget.toFixed(2)} {currency} target
+                  </span>
+                </div>
+                <p className="mt-3 text-xs text-white/50">
+                  Base + {PRESET_RECOVERY_STEPS} recovery trades • live-calculated maximum stake and loss limit
+                </p>
+              </button>
+            ))}
+          </div>
+
+          <p className={`mt-3 text-xs ${selectedPresetId ? "text-cyan-100/75" : "text-white/45"}`}>
+            {presetLoading
+              ? "Requesting current Even and Odd payouts from Deriv..."
+              : presetRequiresRefresh
+                ? "The index or duration changed. Re-apply the preset to refresh its live payout before starting Auto Trade."
+                : presetStatus}
+          </p>
+        </div>
+
         <div className="grid gap-4 md:grid-cols-2">
           <label className="space-y-2 text-sm text-white/75">
             <span className="block text-xs uppercase tracking-[0.18em] text-white/45">Index</span>
@@ -387,31 +702,71 @@ export default function EvenOddPanel({
               step="0.1"
               value={stake}
               disabled={autoRunning}
-              onChange={(event) => setStake(Number(event.target.value))}
+              onChange={(event) => {
+                markPresetCustomized();
+                setStake(Number(event.target.value));
+              }}
               className="w-full rounded-xl border border-white/10 bg-[#0b1220] px-4 py-3 text-white outline-none disabled:opacity-60"
             />
           </label>
 
           <div className="space-y-2 text-sm text-white/75">
-            <span className="block text-xs uppercase tracking-[0.18em] text-white/45">Auto Direction</span>
+            <span className="block text-xs uppercase tracking-[0.18em] text-white/45">Auto Entry</span>
             <div className="grid grid-cols-2 gap-2">
-              {(["Even", "Odd"] as const).map((type) => (
+              {(["smart", "fixed"] as const).map((mode) => (
                 <button
-                  key={type}
+                  key={mode}
                   type="button"
                   disabled={autoRunning}
-                  onClick={() => setDirection(type)}
+                  onClick={() => setAutoMode(mode)}
                   className={`rounded-xl border px-4 py-3 font-semibold transition disabled:opacity-60 ${
-                    direction === type
+                    autoMode === mode
                       ? "border-purple-400/40 bg-purple-500/20 text-purple-100"
                       : "border-white/10 bg-white/5 text-white/70 hover:bg-white/10"
                   }`}
                 >
-                  {type}
+                  {mode === "smart" ? "Smart Signal" : "Fixed"}
                 </button>
               ))}
             </div>
           </div>
+
+          {autoMode === "smart" ? (
+            <label className="space-y-2 text-sm text-white/75">
+              <span className="block text-xs uppercase tracking-[0.18em] text-white/45">Signal Profile</span>
+              <select
+                value={signalProfile}
+                disabled={autoRunning}
+                onChange={(event) => setSignalProfile(event.target.value as SignalProfile)}
+                className="w-full rounded-xl border border-purple-400/20 bg-[#0b1220] px-4 py-3 text-white outline-none disabled:opacity-60"
+              >
+                <option value="conservative">Conservative — fewer entries</option>
+                <option value="balanced">Balanced — recommended</option>
+                <option value="responsive">Responsive — more entries</option>
+              </select>
+            </label>
+          ) : (
+            <div className="space-y-2 text-sm text-white/75">
+              <span className="block text-xs uppercase tracking-[0.18em] text-white/45">Fixed Direction</span>
+              <div className="grid grid-cols-2 gap-2">
+                {(["Even", "Odd"] as const).map((type) => (
+                  <button
+                    key={type}
+                    type="button"
+                    disabled={autoRunning}
+                    onClick={() => setDirection(type)}
+                    className={`rounded-xl border px-4 py-3 font-semibold transition disabled:opacity-60 ${
+                      direction === type
+                        ? "border-purple-400/40 bg-purple-500/20 text-purple-100"
+                        : "border-white/10 bg-white/5 text-white/70 hover:bg-white/10"
+                    }`}
+                  >
+                    {type}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
 
           <label className="space-y-2 text-sm text-white/75">
             <span className="block text-xs uppercase tracking-[0.18em] text-white/45">Profit Target</span>
@@ -421,7 +776,10 @@ export default function EvenOddPanel({
               step="0.01"
               value={profitTarget}
               disabled={autoRunning}
-              onChange={(event) => setProfitTarget(event.target.value)}
+              onChange={(event) => {
+                markPresetCustomized();
+                setProfitTarget(event.target.value);
+              }}
               className="w-full rounded-xl border border-emerald-400/20 bg-[#0b1220] px-4 py-3 text-white outline-none disabled:opacity-60"
             />
           </label>
@@ -434,10 +792,59 @@ export default function EvenOddPanel({
               step="0.01"
               value={lossLimit}
               disabled={autoRunning}
-              onChange={(event) => setLossLimit(event.target.value)}
+              onChange={(event) => {
+                markPresetCustomized();
+                setLossLimit(event.target.value);
+              }}
               className="w-full rounded-xl border border-red-400/20 bg-[#0b1220] px-4 py-3 text-white outline-none disabled:opacity-60"
             />
           </label>
+        </div>
+
+        <div
+          className={`mt-5 rounded-2xl border p-4 ${
+            smartSignal.ready
+              ? "border-emerald-400/25 bg-emerald-500/[0.07]"
+              : "border-white/10 bg-white/[0.03]"
+          }`}
+        >
+          <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+            <div>
+              <div className="flex flex-wrap items-center gap-2">
+                <p className="font-semibold text-white">Smart Signal Monitor</p>
+                <span
+                  className={`rounded-full border px-2.5 py-1 text-[11px] font-bold ${
+                    smartSignal.ready
+                      ? "border-emerald-400/30 bg-emerald-500/10 text-emerald-200"
+                      : "border-amber-400/25 bg-amber-500/10 text-amber-100"
+                  }`}
+                >
+                  {smartSignal.ready ? `${smartSignal.direction.toUpperCase()} QUALIFIED` : "NO TRADE"}
+                </span>
+              </div>
+              <p className="mt-2 text-sm text-white/60">{smartSignal.reason}</p>
+            </div>
+            <div className="grid grid-cols-3 gap-2 text-center text-xs lg:min-w-[390px]">
+              <div className="rounded-xl border border-white/10 bg-black/20 px-3 py-2">
+                <p className="text-white/40">Model</p>
+                <p className="mt-1 font-semibold text-white/80">{smartSignal.model}</p>
+              </div>
+              <div className="rounded-xl border border-white/10 bg-black/20 px-3 py-2">
+                <p className="text-white/40">Estimate</p>
+                <p className="mt-1 font-semibold text-white/80">
+                  {(smartSignal.estimatedProbability * 100).toFixed(1)}%
+                </p>
+              </div>
+              <div className="rounded-xl border border-white/10 bg-black/20 px-3 py-2">
+                <p className="text-white/40">Walk-forward</p>
+                <p className="mt-1 font-semibold text-white/80">
+                  {smartSignal.backtestSamples
+                    ? `${(smartSignal.backtestAccuracy * 100).toFixed(1)}% / ${smartSignal.backtestSamples}`
+                    : "Collecting"}
+                </p>
+              </div>
+            </div>
+          </div>
         </div>
 
         <div className="mt-5 rounded-2xl border border-amber-400/20 bg-amber-500/[0.06] p-4">
@@ -451,7 +858,10 @@ export default function EvenOddPanel({
             <button
               type="button"
               disabled={autoRunning}
-              onClick={() => setMartingaleEnabled((enabled) => !enabled)}
+              onClick={() => {
+                markPresetCustomized();
+                setMartingaleEnabled((enabled) => !enabled);
+              }}
               className={`rounded-full border px-4 py-2 text-xs font-bold transition disabled:opacity-60 ${
                 martingaleEnabled
                   ? "border-amber-300/40 bg-amber-400/20 text-amber-100"
@@ -464,20 +874,41 @@ export default function EvenOddPanel({
 
           {martingaleEnabled && (
             <div className="mt-4 space-y-4">
-              <div className="grid gap-3 md:grid-cols-3">
+              <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
                 <label className="space-y-2 text-sm text-white/75">
-                  <span className="block text-xs uppercase tracking-[0.14em] text-white/45">Multiplier</span>
-                  <input
-                    type="number"
-                    min="1.01"
-                    max="10"
-                    step="0.01"
-                    value={martingaleMultiplier}
+                  <span className="block text-xs uppercase tracking-[0.14em] text-white/45">Recovery Sizing</span>
+                  <select
+                    value={recoveryMode}
                     disabled={autoRunning}
-                    onChange={(event) => setMartingaleMultiplier(event.target.value)}
+                    onChange={(event) => {
+                      markPresetCustomized();
+                      setRecoveryMode(event.target.value as "adaptive" | "multiplier");
+                    }}
                     className="w-full rounded-xl border border-amber-400/20 bg-[#0b1220] px-4 py-3 text-white outline-none disabled:opacity-60"
-                  />
+                  >
+                    <option value="adaptive">Adaptive payout-aware</option>
+                    <option value="multiplier">Fixed multiplier</option>
+                  </select>
                 </label>
+
+                {recoveryMode === "multiplier" && (
+                  <label className="space-y-2 text-sm text-white/75">
+                    <span className="block text-xs uppercase tracking-[0.14em] text-white/45">Multiplier</span>
+                    <input
+                      type="number"
+                      min="1.01"
+                      max="10"
+                      step="0.01"
+                      value={martingaleMultiplier}
+                      disabled={autoRunning}
+                      onChange={(event) => {
+                        markPresetCustomized();
+                        setMartingaleMultiplier(event.target.value);
+                      }}
+                      className="w-full rounded-xl border border-amber-400/20 bg-[#0b1220] px-4 py-3 text-white outline-none disabled:opacity-60"
+                    />
+                  </label>
+                )}
 
                 <label className="space-y-2 text-sm text-white/75">
                   <span className="block text-xs uppercase tracking-[0.14em] text-white/45">Max Recovery Steps</span>
@@ -488,7 +919,10 @@ export default function EvenOddPanel({
                     step="1"
                     value={maxRecoverySteps}
                     disabled={autoRunning}
-                    onChange={(event) => setMaxRecoverySteps(event.target.value)}
+                    onChange={(event) => {
+                      markPresetCustomized();
+                      setMaxRecoverySteps(event.target.value);
+                    }}
                     className="w-full rounded-xl border border-amber-400/20 bg-[#0b1220] px-4 py-3 text-white outline-none disabled:opacity-60"
                   />
                 </label>
@@ -501,15 +935,36 @@ export default function EvenOddPanel({
                     step="0.01"
                     value={maxMartingaleStake}
                     disabled={autoRunning}
-                    onChange={(event) => setMaxMartingaleStake(event.target.value)}
+                    onChange={(event) => {
+                      markPresetCustomized();
+                      setMaxMartingaleStake(event.target.value);
+                    }}
                     className="w-full rounded-xl border border-amber-400/20 bg-[#0b1220] px-4 py-3 text-white outline-none disabled:opacity-60"
                   />
                 </label>
+
+                {recoveryMode === "adaptive" && (
+                  <div className="rounded-xl border border-amber-400/20 bg-black/20 px-4 py-3 text-sm text-white/75">
+                    <span className="block text-xs uppercase tracking-[0.14em] text-white/45">Win Return Used</span>
+                    <p className="mt-2 font-semibold text-amber-100">
+                      {(recoveryProfitRate * 100).toFixed(1)}% of stake
+                    </p>
+                    <p className="mt-1 text-[11px] text-white/45">
+                      {payoutRateSamples.length
+                        ? `Median of ${payoutRateSamples.length} recent quote${payoutRateSamples.length === 1 ? "" : "s"}`
+                        : currentPreviewRate !== null
+                          ? "Lower of the current live Even and Odd quotes"
+                          : "Temporary estimate until a live quote is loaded"}
+                    </p>
+                  </div>
+                )}
               </div>
 
               {projectedMartingaleStakes.length > 0 && (
                 <div>
-                  <p className="text-xs uppercase tracking-[0.14em] text-white/45">Projected Stake Ladder</p>
+                  <p className="text-xs uppercase tracking-[0.14em] text-white/45">
+                    {recoveryMode === "adaptive" ? "Payout-aware Recovery Ladder" : "Projected Stake Ladder"}
+                  </p>
                   <div className="mt-2 flex flex-wrap gap-2">
                     {projectedMartingaleStakes.map((projectedStake, step) => {
                       const exceedsMaximum = projectedStake > maxMartingaleStakeValue;
@@ -532,7 +987,7 @@ export default function EvenOddPanel({
               )}
 
               <p className="text-xs leading-relaxed text-amber-100/70">
-                A 2× multiplier may not recover every Deriv loss because the winning profit can be less than the stake. Martingale does not guarantee profit. Auto Trade stops instead of exceeding your recovery-step, maximum-stake, or loss limits.
+                Adaptive sizing uses recent proposal payouts to target the accumulated loss plus one base-trade profit. After a loss, Auto Trade also waits two fresh ticks. No Martingale method guarantees recovery; hard recovery-step, maximum-stake, and session-loss limits remain enforced.
               </p>
             </div>
           )}
@@ -569,8 +1024,8 @@ export default function EvenOddPanel({
 
         <p className="mt-3 text-center text-xs text-white/55">{displayedAutoStatus}</p>
         <p className="mt-2 text-center text-[11px] text-amber-200/70">
-          Recent digit percentages are descriptive only and do not guarantee the next result. Auto Trade never opens overlapping contracts
-          {martingaleEnabled ? " and resets the stake after a win." : " and uses a fixed stake."}
+          Signal estimates and walk-forward accuracy describe recent ticks; they cannot guarantee the next result. Smart Auto skips weak signals and never opens overlapping contracts
+          {martingaleEnabled ? ", then resets recovery after a win." : "."}
         </p>
       </div>
 

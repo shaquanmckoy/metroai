@@ -366,6 +366,7 @@ type Trade = {
   durationTicks: number;
 
   payout?: number;
+  expectedPayout?: number;
   profit?: number;
 
   // ✅ digit contract settled on (exit/settlement digit)
@@ -1479,6 +1480,15 @@ if (data.msg_type === "proposal") {
 
   const info = reqInfoRef.current[req_id];
   const stakeForReq = info?.stake ?? stake;
+  const expectedPayout = Number(data.proposal?.payout ?? 0);
+
+  if (Number.isFinite(expectedPayout) && expectedPayout > 0) {
+    setTradeHistory((previous) =>
+      previous.map((trade) =>
+        trade.id === req_id ? { ...trade, expectedPayout } : trade
+      )
+    );
+  }
 
   if (info?.turbo) {
     enqueueBuy(req_id, proposalId, stakeForReq);
@@ -1688,7 +1698,10 @@ const requestHigherLowerPreview = async ({
   const req_id = newReqId();
   const { duration, duration_unit } = parseMSpiderDuration(durationValue);
 
-  const proposal = await new Promise<any>((resolve, reject) => {
+  const proposal = await new Promise<{
+    ask_price?: string | number;
+    payout?: string | number;
+  }>((resolve, reject) => {
     proposalPreviewWaitersRef.current[req_id] = {
       resolve,
       reject: (msg: string) => reject(new Error(msg)),
@@ -1727,6 +1740,75 @@ const requestHigherLowerPreview = async ({
   return {
     payout: Number.isFinite(payout) ? payout : 0,
     profit: Number.isFinite(profit) ? profit : 0,
+  };
+};
+
+const requestEvenOddPreview = async ({
+  direction,
+  durationTicks,
+  customStake,
+}: {
+  direction: "Even" | "Odd";
+  durationTicks: number;
+  customStake: number;
+}) => {
+  if (!customStake || customStake <= 0) {
+    return { payout: 0, askPrice: 0, profitRate: 0 };
+  }
+  if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+    return { payout: 0, askPrice: 0, profitRate: 0 };
+  }
+  if (!authorizedRef.current) {
+    return { payout: 0, askPrice: 0, profitRate: 0 };
+  }
+
+  const req_id = newReqId();
+  const proposal = await new Promise<{
+    ask_price?: string | number;
+    payout?: string | number;
+  }>((resolve, reject) => {
+    proposalPreviewWaitersRef.current[req_id] = {
+      resolve,
+      reject: (message: string) => reject(new Error(message)),
+    };
+
+    const sent = safeSend({
+      proposal: 1,
+      amount: customStake,
+      basis: "stake",
+      contract_type: getContractType(direction, false),
+      currency: currency || "USD",
+      underlying_symbol: resolveLiveSymbol(selectedPair),
+      duration: durationTicks,
+      duration_unit: "t",
+      req_id,
+    });
+
+    if (!sent) {
+      delete proposalPreviewWaitersRef.current[req_id];
+      reject(new Error("WebSocket not connected"));
+      return;
+    }
+
+    window.setTimeout(() => {
+      if (proposalPreviewWaitersRef.current[req_id]) {
+        delete proposalPreviewWaitersRef.current[req_id];
+        reject(new Error("Even/Odd proposal preview timeout"));
+      }
+    }, 4000);
+  });
+
+  const askPrice = Number(proposal?.ask_price ?? customStake);
+  const payout = Number(proposal?.payout ?? 0);
+  const profitRate =
+    Number.isFinite(askPrice) && askPrice > 0 && Number.isFinite(payout) && payout > askPrice
+      ? (payout - askPrice) / askPrice
+      : 0;
+
+  return {
+    payout: Number.isFinite(payout) ? payout : 0,
+    askPrice: Number.isFinite(askPrice) ? askPrice : 0,
+    profitRate,
   };
 };
 
@@ -2993,6 +3075,7 @@ const toggleSpiderRandomAuto = async () => {
       onPlaceTrade={(type: "Even" | "Odd", duration: number, tradeStake?: number) =>
         placeTrade(type, duration, tradeStake)
       }
+      requestPayoutPreview={requestEvenOddPreview}
       tradeHistoryPanel={
         <StrategyTradeHistoryTab
           title="Even/Odd Trade History"
