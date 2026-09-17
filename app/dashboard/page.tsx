@@ -3069,6 +3069,7 @@ const toggleSpiderRandomAuto = async () => {
       }}
       stake={stake}
       setStake={handleStakeChange}
+      balance={balance}
       currency={currency}
       connected={connected}
       tradeHistory={tradeHistory}

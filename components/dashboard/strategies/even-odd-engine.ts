@@ -11,6 +11,10 @@ export type EvenOddSignal = {
   backtestSamples: number;
   modelSamples: number;
   dataPoints: number;
+  breakEvenWinRate: number;
+  confidenceLowerBound: number;
+  conservativeExpectedValue: number;
+  confidenceLevel: number;
   reason: string;
 };
 
@@ -24,10 +28,10 @@ type ModelEstimate = {
 
 type ModelEvaluation = {
   model: ModelKey;
-  estimate: ModelEstimate;
   accuracy: number;
   adjustedAccuracy: number;
   trials: number;
+  wins: number;
 };
 
 const MODEL_LABELS: Record<ModelKey, string> = {
@@ -40,36 +44,79 @@ const PROFILE_RULES: Record<
   SignalProfile,
   {
     minDigits: number;
+    selectionWindow: number;
+    validationWindow: number;
     minModelSamples: number;
-    minBacktestSamples: number;
-    minProbability: number;
-    minAdjustedAccuracy: number;
+    minValidationSamples: number;
+    currentProbabilityMargin: number;
+    payoutSafetyMargin: number;
   }
 > = {
   conservative: {
-    minDigits: 120,
-    minModelSamples: 28,
-    minBacktestSamples: 36,
-    minProbability: 0.61,
-    minAdjustedAccuracy: 0.59,
+    minDigits: 300,
+    selectionWindow: 140,
+    validationWindow: 120,
+    minModelSamples: 40,
+    minValidationSamples: 100,
+    currentProbabilityMargin: 0.025,
+    payoutSafetyMargin: 0.015,
   },
   balanced: {
-    minDigits: 80,
-    minModelSamples: 18,
-    minBacktestSamples: 28,
-    minProbability: 0.59,
-    minAdjustedAccuracy: 0.57,
+    minDigits: 240,
+    selectionWindow: 110,
+    validationWindow: 90,
+    minModelSamples: 30,
+    minValidationSamples: 75,
+    currentProbabilityMargin: 0.02,
+    payoutSafetyMargin: 0.01,
   },
   responsive: {
-    minDigits: 50,
-    minModelSamples: 12,
-    minBacktestSamples: 20,
-    minProbability: 0.56,
-    minAdjustedAccuracy: 0.55,
+    minDigits: 180,
+    selectionWindow: 80,
+    validationWindow: 60,
+    minModelSamples: 20,
+    minValidationSamples: 50,
+    currentProbabilityMargin: 0.015,
+    payoutSafetyMargin: 0.005,
   },
 };
 
+const ONE_SIDED_95_PERCENT_Z = 1.6448536269514722;
+
 const parity = (digit: number): 0 | 1 => (digit % 2 === 0 ? 0 : 1);
+
+export function calculateBreakEvenWinRate(profitRate: number): number {
+  if (!Number.isFinite(profitRate) || profitRate <= 0) return 1;
+  return 1 / (1 + profitRate);
+}
+
+export function wilsonLowerBound(
+  wins: number,
+  trials: number,
+  z = ONE_SIDED_95_PERCENT_Z
+): number {
+  if (
+    !Number.isFinite(wins) ||
+    !Number.isFinite(trials) ||
+    trials <= 0 ||
+    wins < 0 ||
+    wins > trials
+  ) {
+    return 0;
+  }
+
+  const proportion = wins / trials;
+  const zSquared = z * z;
+  const denominator = 1 + zSquared / trials;
+  const centre = proportion + zSquared / (2 * trials);
+  const spread =
+    z *
+    Math.sqrt(
+      (proportion * (1 - proportion) + zSquared / (4 * trials)) / trials
+    );
+
+  return Math.max(0, (centre - spread) / denominator);
+}
 
 const estimateDirection = (evenOutcomes: number, samples: number): ModelEstimate => {
   // A small symmetric prior keeps short, noisy samples close to 50/50.
@@ -131,15 +178,16 @@ const getModelEstimate = (digits: number[], model: ModelKey): ModelEstimate | nu
   return samples ? estimateDirection(evenOutcomes, samples) : null;
 };
 
-const evaluateModel = (digits: number[], model: ModelKey): ModelEvaluation | null => {
-  const estimate = getModelEstimate(digits, model);
-  if (!estimate) return null;
-
-  const firstPredictionIndex = Math.max(24, digits.length - 70);
+const evaluateWindow = (
+  digits: number[],
+  model: ModelKey,
+  startIndex: number,
+  endIndex: number
+): ModelEvaluation | null => {
   let wins = 0;
   let trials = 0;
 
-  for (let index = firstPredictionIndex; index < digits.length; index++) {
+  for (let index = Math.max(24, startIndex); index < endIndex; index++) {
     const historicalEstimate = getModelEstimate(digits.slice(0, index), model);
     if (!historicalEstimate || historicalEstimate.samples < 8) continue;
     trials++;
@@ -149,89 +197,133 @@ const evaluateModel = (digits: number[], model: ModelKey): ModelEvaluation | nul
 
   if (!trials) return null;
   const accuracy = wins / trials;
-  // Shrink the displayed result toward chance so small backtests cannot dominate.
+  // Shrink model-selection scores toward chance so short samples cannot dominate.
   const adjustedAccuracy = (wins + 8) / (trials + 16);
 
-  return { model, estimate, accuracy, adjustedAccuracy, trials };
+  return { model, accuracy, adjustedAccuracy, trials, wins };
 };
 
 export function analyzeEvenOddSignal(
   sourceDigits: number[],
-  profile: SignalProfile
+  profile: SignalProfile,
+  payoutProfitRate = 0.9
 ): EvenOddSignal {
   const digits = sourceDigits
     .filter((digit) => Number.isInteger(digit) && digit >= 0 && digit <= 9)
-    .slice(-240);
+    .slice(-800);
   const rules = PROFILE_RULES[profile];
+  const profitRate =
+    Number.isFinite(payoutProfitRate) && payoutProfitRate > 0
+      ? payoutProfitRate
+      : 0.9;
+  const breakEvenWinRate = calculateBreakEvenWinRate(profitRate);
   const fallbackDirection: EvenOddDirection =
     digits.length && parity(digits[digits.length - 1]) === 0 ? "Odd" : "Even";
+  const emptyResult = (reason: string, model = "Collecting data"): EvenOddSignal => ({
+    ready: false,
+    direction: fallbackDirection,
+    model,
+    estimatedProbability: 0.5,
+    backtestAccuracy: 0.5,
+    backtestSamples: 0,
+    modelSamples: digits.length,
+    dataPoints: digits.length,
+    breakEvenWinRate,
+    confidenceLowerBound: 0,
+    conservativeExpectedValue: -1,
+    confidenceLevel: 0.95,
+    reason,
+  });
 
   if (digits.length < rules.minDigits) {
-    return {
-      ready: false,
-      direction: fallbackDirection,
-      model: "Collecting data",
-      estimatedProbability: 0.5,
-      backtestAccuracy: 0.5,
-      backtestSamples: 0,
-      modelSamples: digits.length,
-      dataPoints: digits.length,
-      reason: `Collecting ${rules.minDigits - digits.length} more live digits for the ${profile} profile.`,
-    };
+    return emptyResult(
+      `Collecting ${rules.minDigits - digits.length} more live digits for independent validation.`
+    );
   }
 
+  const validationStart = digits.length - rules.validationWindow;
+  const selectionStart = Math.max(24, validationStart - rules.selectionWindow);
   const models: ModelKey[] = ["rolling-bias", "last-parity", "two-parity-pattern"];
-  const evaluations = models
-    .map((model) => evaluateModel(digits, model))
+  const selectionEvaluations = models
+    .map((model) => evaluateWindow(digits, model, selectionStart, validationStart))
     .filter((evaluation): evaluation is ModelEvaluation => evaluation !== null)
     .sort((a, b) => {
-      const aScore = a.adjustedAccuracy + Math.min(a.estimate.samples, 100) / 10_000;
-      const bScore = b.adjustedAccuracy + Math.min(b.estimate.samples, 100) / 10_000;
+      const aScore = a.adjustedAccuracy + Math.min(a.trials, 100) / 10_000;
+      const bScore = b.adjustedAccuracy + Math.min(b.trials, 100) / 10_000;
       return bScore - aScore;
     });
-  const best = evaluations[0];
+  const selected = selectionEvaluations[0];
 
-  if (!best) {
-    return {
-      ready: false,
-      direction: fallbackDirection,
-      model: "No qualified model",
-      estimatedProbability: 0.5,
-      backtestAccuracy: 0.5,
-      backtestSamples: 0,
-      modelSamples: 0,
-      dataPoints: digits.length,
-      reason: "Waiting for enough repeated parity patterns to evaluate a signal.",
-    };
+  if (!selected) {
+    return emptyResult(
+      "Waiting for enough earlier observations to select a model without using the validation window.",
+      "No qualified model"
+    );
   }
 
-  const enoughModelSamples = best.estimate.samples >= rules.minModelSamples;
-  const enoughBacktestSamples = best.trials >= rules.minBacktestSamples;
-  const strongCurrentEstimate = best.estimate.probability >= rules.minProbability;
-  const validatedAccuracy = best.adjustedAccuracy >= rules.minAdjustedAccuracy;
-  const ready =
-    enoughModelSamples && enoughBacktestSamples && strongCurrentEstimate && validatedAccuracy;
+  // Judge the selected model only on later observations that were not used to
+  // choose it. The same data is never reported as both selection and proof.
+  const validation = evaluateWindow(
+    digits,
+    selected.model,
+    validationStart,
+    digits.length
+  );
+  const liveEstimate = getModelEstimate(digits, selected.model);
 
-  let reason = `${MODEL_LABELS[best.model]} currently favors ${best.estimate.direction.toLowerCase()}.`;
+  if (!validation || !liveEstimate) {
+    return emptyResult(
+      "The selected model does not yet have a complete independent validation window.",
+      MODEL_LABELS[selected.model]
+    );
+  }
+
+  const confidenceLowerBound = wilsonLowerBound(validation.wins, validation.trials);
+  const conservativeExpectedValue =
+    confidenceLowerBound * profitRate - (1 - confidenceLowerBound);
+  const enoughModelSamples = liveEstimate.samples >= rules.minModelSamples;
+  const enoughValidationSamples = validation.trials >= rules.minValidationSamples;
+  const strongCurrentEstimate =
+    liveEstimate.probability >= breakEvenWinRate + rules.currentProbabilityMargin;
+  const clearsPayoutGate =
+    confidenceLowerBound >= breakEvenWinRate + rules.payoutSafetyMargin;
+  const ready =
+    enoughModelSamples &&
+    enoughValidationSamples &&
+    strongCurrentEstimate &&
+    clearsPayoutGate &&
+    conservativeExpectedValue > 0;
+
+  let reason = `${MODEL_LABELS[selected.model]} favors ${liveEstimate.direction.toLowerCase()} and clears the live payout gate.`;
   if (!enoughModelSamples) {
-    reason = `Waiting for ${rules.minModelSamples - best.estimate.samples} more matching model samples.`;
-  } else if (!enoughBacktestSamples) {
-    reason = `Waiting for ${rules.minBacktestSamples - best.trials} more walk-forward checks.`;
+    reason = `Waiting for ${rules.minModelSamples - liveEstimate.samples} more matching model samples.`;
+  } else if (!enoughValidationSamples) {
+    reason = `Waiting for ${rules.minValidationSamples - validation.trials} more out-of-sample checks.`;
   } else if (!strongCurrentEstimate) {
-    reason = `No trade: the current estimate is below the ${(rules.minProbability * 100).toFixed(0)}% threshold.`;
-  } else if (!validatedAccuracy) {
-    reason = `No trade: recent walk-forward accuracy is below the ${(rules.minAdjustedAccuracy * 100).toFixed(0)}% quality threshold.`;
+    reason = `No trade: the current estimate does not clear the ${(
+      (breakEvenWinRate + rules.currentProbabilityMargin) *
+      100
+    ).toFixed(1)}% payout-adjusted entry threshold.`;
+  } else if (!clearsPayoutGate || conservativeExpectedValue <= 0) {
+    reason = `No trade: the 95% lower confidence bound does not clear the ${(
+      (breakEvenWinRate + rules.payoutSafetyMargin) *
+      100
+    ).toFixed(1)}% payout-adjusted safety threshold.`;
   }
 
   return {
     ready,
-    direction: best.estimate.direction,
-    model: MODEL_LABELS[best.model],
-    estimatedProbability: best.estimate.probability,
-    backtestAccuracy: best.accuracy,
-    backtestSamples: best.trials,
-    modelSamples: best.estimate.samples,
+    direction: liveEstimate.direction,
+    model: MODEL_LABELS[selected.model],
+    estimatedProbability: liveEstimate.probability,
+    backtestAccuracy: validation.accuracy,
+    backtestSamples: validation.trials,
+    modelSamples: liveEstimate.samples,
     dataPoints: digits.length,
+    breakEvenWinRate,
+    confidenceLowerBound,
+    conservativeExpectedValue,
+    confidenceLevel: 0.95,
     reason,
   };
 }
