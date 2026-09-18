@@ -23,6 +23,7 @@ type PairGroups = {
 type PairScanResult = {
   pair: Pair;
   label: string;
+  ready: boolean;
   winRate: number;
   confidenceLowerBound: number;
   samples: number;
@@ -65,6 +66,8 @@ type EvenOddPanelProps = {
 
 const AUTO_TRADE_DELAY_MS = 750;
 const PRESET_RECOVERY_STEPS = 2;
+const PAIR_SCAN_TICK_WINDOW = 15;
+const PAIR_SCAN_MIN_CONFIDENCE = 0.6;
 
 const formatCooldownTime = (seconds: number): string => {
   const safeSeconds = Math.max(0, Math.floor(seconds));
@@ -149,6 +152,8 @@ export default function EvenOddPanel({
   const [maxMartingaleStake, setMaxMartingaleStake] = useState("25");
   const [maxSessionTrades, setMaxSessionTrades] = useState("10");
   const [martingaleDetailsOpen, setMartingaleDetailsOpen] = useState(true);
+  const [presetDetailsOpen, setPresetDetailsOpen] = useState(true);
+  const [signalMonitorOpen, setSignalMonitorOpen] = useState(true);
   const [profitCooldownMinutes, setProfitCooldownMinutes] = useState("2");
   const [profitCooldownRemainingSeconds, setProfitCooldownRemainingSeconds] = useState<
     number | null
@@ -199,34 +204,44 @@ export default function EvenOddPanel({
   const evenCount = recentDigits.filter((digit) => digit % 2 === 0).length;
   const evenPercent = recentDigits.length ? (evenCount / recentDigits.length) * 100 : 0;
   const oddPercent = recentDigits.length ? 100 - evenPercent : 0;
-  const pairScanRankings = useMemo(() => {
+  const pairScanAnalysis = useMemo(() => {
     const pairOptions = [...indexGroups.volatility, ...indexGroups.jump];
 
     return pairOptions
-      .map((option): PairScanResult | null => {
+      .map((option): PairScanResult => {
         const pair = option.code as Pair;
         const confidence = analyzeFixedDirectionConfidence(
-          pairDigitsByPair[pair] ?? [],
-          direction
+          (pairDigitsByPair[pair] ?? []).slice(-PAIR_SCAN_TICK_WINDOW),
+          direction,
+          PAIR_SCAN_TICK_WINDOW
         );
-        if (!confidence.ready) return null;
 
         return {
           pair,
           label: option.label,
+          ready: confidence.ready,
           winRate: confidence.winRate,
           confidenceLowerBound: confidence.confidenceLowerBound,
           samples: confidence.samples,
         };
-      })
-      .filter((result): result is PairScanResult => result !== null)
+      });
+  }, [direction, indexGroups.jump, indexGroups.volatility, pairDigitsByPair]);
+  const pairScanReadyCount = pairScanAnalysis.filter((result) => result.ready).length;
+  const pairScanRankings = useMemo(
+    () =>
+      pairScanAnalysis
+      .filter(
+        (result) =>
+          result.ready && result.winRate >= PAIR_SCAN_MIN_CONFIDENCE
+      )
       .sort(
         (a, b) =>
-          b.confidenceLowerBound - a.confidenceLowerBound ||
           b.winRate - a.winRate ||
+          b.confidenceLowerBound - a.confidenceLowerBound ||
           b.samples - a.samples
-      );
-  }, [direction, indexGroups.jump, indexGroups.volatility, pairDigitsByPair]);
+      ),
+    [pairScanAnalysis]
+  );
   const bestScannedPair = pairScanRankings[0] ?? null;
   const totalPairScanCandidates = indexGroups.volatility.length + indexGroups.jump.length;
   const evenOddTrades = useMemo(
@@ -253,6 +268,7 @@ export default function EvenOddPanel({
   const maxMartingaleStakeValue = Number(maxMartingaleStake);
   const maxSessionTradesValue = Number(maxSessionTrades);
   const profitCooldownMinutesValue = Number(profitCooldownMinutes);
+  const stopAtProfitTarget = profitCooldownMinutes === "stop";
   const baseAutoStake = sessionBaseStake ?? stake;
   const settledSessionTrades = useMemo(
     () =>
@@ -489,6 +505,15 @@ export default function EvenOddPanel({
 
     if (sessionNet >= profitTargetValue) {
       const cooldownTimer = window.setTimeout(() => {
+        if (stopAtProfitTarget) {
+          autoRunningRef.current = false;
+          setAutoRunning(false);
+          setAutoStatus(
+            `Profit target reached: +${sessionNet.toFixed(2)} ${currency}. Auto Trade stopped as selected.`
+          );
+          return;
+        }
+
         const cooldownSeconds = profitCooldownMinutesValue * 60;
         setProfitCooldownRemainingSeconds(cooldownSeconds);
         setAutoStatus(
@@ -551,7 +576,11 @@ export default function EvenOddPanel({
     if (pairScannerEnabled && autoMode === "fixed") {
       if (!bestScannedPair) return;
 
-      const scannerTarget = scannerLockedPairRef.current ?? bestScannedPair.pair;
+      const lockedPair = scannerLockedPairRef.current;
+      const lockedResult = lockedPair
+        ? pairScanRankings.find((result) => result.pair === lockedPair)
+        : null;
+      const scannerTarget = lockedResult?.pair ?? bestScannedPair.pair;
       scannerLockedPairRef.current = scannerTarget;
 
       if (scannerTarget !== selectedPair) {
@@ -565,7 +594,7 @@ export default function EvenOddPanel({
           onAutoSelectPair(scannerTarget);
           setPairScannerStatus(
             targetResult
-              ? `Switched to ${targetResult.label}: ${(targetResult.winRate * 100).toFixed(1)}% ${direction.toLowerCase()} win rate with a ${(targetResult.confidenceLowerBound * 100).toFixed(1)}% confidence floor.`
+              ? `Switched to ${targetResult.label}: ${(targetResult.winRate * 100).toFixed(1)}% confidence for fixed ${direction} across the latest ${PAIR_SCAN_TICK_WINDOW} ticks.`
               : `Switched to ${scannerTarget}.`
           );
         }, 0);
@@ -620,6 +649,7 @@ export default function EvenOddPanel({
     sessionTradeLimitReached,
     selectedPair,
     smartEntryReady,
+    stopAtProfitTarget,
     bestScannedPair,
     ticks.length,
   ]);
@@ -832,8 +862,11 @@ export default function EvenOddPanel({
     ) {
       return alert("Maximum session trades must be a whole number from 1 to 50");
     }
-    if (![2, 5, 7, 10].includes(profitCooldownMinutesValue)) {
-      return alert("Choose a profit cooldown of 2, 5, 7, or 10 minutes");
+    if (
+      !stopAtProfitTarget &&
+      ![2, 5, 7, 10].includes(profitCooldownMinutesValue)
+    ) {
+      return alert("Choose No restart or a profit cooldown of 2, 5, 7, or 10 minutes");
     }
     if (martingaleEnabled) {
       if (
@@ -896,10 +929,12 @@ export default function EvenOddPanel({
       ? `Profit target reached. Auto Trade restarts in ${formatCooldownTime(profitCooldownRemainingSeconds)}.`
       : hasPendingTrade
       ? "Waiting for the current contract to settle..."
-      : recoveryPauseRemaining > 0
+        : recoveryPauseRemaining > 0
         ? `Recovery cooldown: waiting ${recoveryPauseRemaining} more tick${recoveryPauseRemaining === 1 ? "" : "s"}.`
         : pairScannerEnabled && autoMode === "fixed" && !bestScannedPair
-          ? `Best Pair Scan: ${pairScanRankings.length}/${totalPairScanCandidates} pairs have at least 120 live digits.`
+          ? pairScanReadyCount < totalPairScanCandidates
+            ? `Best Pair Scan: ${pairScanReadyCount}/${totalPairScanCandidates} pairs have ${PAIR_SCAN_TICK_WINDOW} live ticks. Waiting for at least ${PAIR_SCAN_MIN_CONFIDENCE * 100}% ${direction.toLowerCase()} confidence.`
+            : `Best Pair Scan: no pair currently has at least ${PAIR_SCAN_MIN_CONFIDENCE * 100}% confidence for fixed ${direction}.`
           : pairScannerEnabled &&
               autoMode === "fixed" &&
               bestScannedPair &&
@@ -983,57 +1018,74 @@ export default function EvenOddPanel({
           <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
             <div>
               <p className="font-semibold text-cyan-100">Payout-aware Martingale Presets</p>
-              <p className="mt-1 max-w-3xl text-xs leading-relaxed text-white/55">
-                Presets load a complete Auto Trade configuration. Adaptive recovery uses Deriv&apos;s lower live Even/Odd return; fixed recovery follows its selected multiplier. Both remain subject to hard loss, stake, recovery-step, and trade-count stops.
+              {presetDetailsOpen && (
+                <p className="mt-1 max-w-3xl text-xs leading-relaxed text-white/55">
+                  Presets load a complete Auto Trade configuration. Adaptive recovery uses Deriv&apos;s lower live Even/Odd return; fixed recovery follows its selected multiplier. Both remain subject to hard loss, stake, recovery-step, and trade-count stops.
+                </p>
+              )}
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="rounded-full border border-cyan-400/20 bg-cyan-500/10 px-3 py-1 text-[11px] font-bold text-cyan-100">
+                {currentPreviewRate !== null
+                  ? "LIVE PAYOUT"
+                  : presetRequiresRefresh
+                    ? "REFRESH REQUIRED"
+                    : "ESTIMATE UNTIL CONNECTED"}
+              </span>
+              <button
+                type="button"
+                aria-expanded={presetDetailsOpen}
+                aria-controls="payout-aware-preset-details"
+                onClick={() => setPresetDetailsOpen((open) => !open)}
+                className="rounded-full border border-cyan-300/25 bg-black/20 px-3 py-1 text-[11px] font-bold text-cyan-100 transition hover:bg-cyan-400/10"
+              >
+                {presetDetailsOpen ? "Hide presets ▲" : "Show presets ▼"}
+              </button>
+            </div>
+          </div>
+
+          {presetDetailsOpen && (
+            <div id="payout-aware-preset-details">
+              <div className="mt-4 grid gap-3 md:grid-cols-2">
+                {MARTINGALE_PRESETS.map((preset) => (
+                  <button
+                    key={preset.id}
+                    type="button"
+                    disabled={autoRunning || presetLoading}
+                    onClick={() => void applyMartingalePreset(preset)}
+                    className={`rounded-xl border p-4 text-left transition disabled:cursor-wait disabled:opacity-60 ${
+                      selectedPresetId === preset.id
+                        ? "border-cyan-300/45 bg-cyan-400/15"
+                        : "border-white/10 bg-black/20 hover:border-cyan-400/30 hover:bg-cyan-500/[0.07]"
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-3">
+                      <div>
+                        <p className="text-xs uppercase tracking-[0.16em] text-white/45">{preset.label}</p>
+                        <p className="mt-1 text-lg font-bold text-white">
+                          {preset.baseStake.toFixed(2)} {currency} start
+                        </p>
+                      </div>
+                      <span className="rounded-lg bg-emerald-500/10 px-3 py-2 text-sm font-bold text-emerald-200">
+                        {preset.profitTarget.toFixed(2)} {currency} target
+                      </span>
+                    </div>
+                    <p className="mt-3 text-xs text-white/50">
+                      {preset.description}
+                    </p>
+                  </button>
+                ))}
+              </div>
+
+              <p className={`mt-3 text-xs ${selectedPresetId ? "text-cyan-100/75" : "text-white/45"}`}>
+                {presetLoading
+                  ? "Requesting current Even and Odd payouts from Deriv..."
+                  : presetRequiresRefresh
+                    ? "The index or duration changed. Re-apply the preset to refresh its live payout before starting Auto Trade."
+                    : presetStatus}
               </p>
             </div>
-            <span className="rounded-full border border-cyan-400/20 bg-cyan-500/10 px-3 py-1 text-[11px] font-bold text-cyan-100">
-              {currentPreviewRate !== null
-                ? "LIVE PAYOUT"
-                : presetRequiresRefresh
-                  ? "REFRESH REQUIRED"
-                  : "ESTIMATE UNTIL CONNECTED"}
-            </span>
-          </div>
-
-          <div className="mt-4 grid gap-3 md:grid-cols-2">
-            {MARTINGALE_PRESETS.map((preset) => (
-              <button
-                key={preset.id}
-                type="button"
-                disabled={autoRunning || presetLoading}
-                onClick={() => void applyMartingalePreset(preset)}
-                className={`rounded-xl border p-4 text-left transition disabled:cursor-wait disabled:opacity-60 ${
-                  selectedPresetId === preset.id
-                    ? "border-cyan-300/45 bg-cyan-400/15"
-                    : "border-white/10 bg-black/20 hover:border-cyan-400/30 hover:bg-cyan-500/[0.07]"
-                }`}
-              >
-                <div className="flex items-center justify-between gap-3">
-                  <div>
-                    <p className="text-xs uppercase tracking-[0.16em] text-white/45">{preset.label}</p>
-                    <p className="mt-1 text-lg font-bold text-white">
-                      {preset.baseStake.toFixed(2)} {currency} start
-                    </p>
-                  </div>
-                  <span className="rounded-lg bg-emerald-500/10 px-3 py-2 text-sm font-bold text-emerald-200">
-                    {preset.profitTarget.toFixed(2)} {currency} target
-                  </span>
-                </div>
-                <p className="mt-3 text-xs text-white/50">
-                  {preset.description}
-                </p>
-              </button>
-            ))}
-          </div>
-
-          <p className={`mt-3 text-xs ${selectedPresetId ? "text-cyan-100/75" : "text-white/45"}`}>
-            {presetLoading
-              ? "Requesting current Even and Odd payouts from Deriv..."
-              : presetRequiresRefresh
-                ? "The index or duration changed. Re-apply the preset to refresh its live payout before starting Auto Trade."
-                : presetStatus}
-          </p>
+          )}
         </div>
 
         <div className="grid gap-4 md:grid-cols-2">
@@ -1144,7 +1196,9 @@ export default function EvenOddPanel({
                       setDirection(type);
                       scannerLockedPairRef.current = null;
                       if (pairScannerEnabled) {
-                        setPairScannerStatus(`Scanning all pairs for fixed ${type}...`);
+                        setPairScannerStatus(
+                          `Scanning the latest ${PAIR_SCAN_TICK_WINDOW} ticks on every pair for at least ${PAIR_SCAN_MIN_CONFIDENCE * 100}% fixed ${type} confidence...`
+                        );
                       }
                     }}
                     className={`rounded-xl border px-4 py-3 font-semibold transition disabled:opacity-60 ${
@@ -1166,7 +1220,7 @@ export default function EvenOddPanel({
                   if (nextEnabled) {
                     onRequestPairScanFeeds();
                     setPairScannerStatus(
-                      `Collecting at least 120 live digits per pair for fixed ${direction}...`
+                      `Collecting ${PAIR_SCAN_TICK_WINDOW} live ticks per pair for at least ${PAIR_SCAN_MIN_CONFIDENCE * 100}% fixed ${direction} confidence...`
                     );
                   } else {
                     setPairScannerStatus("Best Pair Scan is off.");
@@ -1182,13 +1236,13 @@ export default function EvenOddPanel({
               </button>
               <p className="mt-2 text-[11px] leading-relaxed text-white/45">
                 {pairScannerEnabled && bestScannedPair
-                  ? `Best now: ${bestScannedPair.label} • ${(bestScannedPair.winRate * 100).toFixed(1)}% ${direction.toLowerCase()} wins • ${(bestScannedPair.confidenceLowerBound * 100).toFixed(1)}% confidence floor • ${bestScannedPair.samples} ticks`
+                  ? `Best now: ${bestScannedPair.label} • ${(bestScannedPair.winRate * 100).toFixed(1)}% confidence for fixed ${direction} • latest ${bestScannedPair.samples} ticks`
                   : pairScannerEnabled
-                    ? `${pairScanRankings.length}/${totalPairScanCandidates} pairs have enough data. ${pairScannerStatus}`
+                    ? `${pairScanReadyCount}/${totalPairScanCandidates} pairs have ${PAIR_SCAN_TICK_WINDOW} ticks; ${pairScanRankings.length} currently meet the ${PAIR_SCAN_MIN_CONFIDENCE * 100}% threshold. ${pairScannerStatus}`
                     : pairScannerStatus}
               </p>
               <p className="mt-1 text-[10px] text-amber-100/60">
-                Ranking uses the 95% confidence floor, then observed win rate. It identifies the strongest recent sample, not a guaranteed predictive edge.
+                Confidence is the selected direction&apos;s observed win rate across the latest {PAIR_SCAN_TICK_WINDOW} ticks. Auto Trade waits unless a pair is at least {PAIR_SCAN_MIN_CONFIDENCE * 100}%. This recent sample is not a guaranteed predictive edge.
               </p>
             </div>
           )}
@@ -1252,6 +1306,7 @@ export default function EvenOddPanel({
               onChange={(event) => setProfitCooldownMinutes(event.target.value)}
               className="w-full rounded-xl border border-emerald-400/20 bg-[#0b1220] px-4 py-3 text-white outline-none disabled:opacity-60"
             >
+              <option value="stop">No restart — stop at profit target</option>
               <option value="2">Restart after 2 minutes</option>
               <option value="5">Restart after 5 minutes</option>
               <option value="7">Restart after 7 minutes</option>
@@ -1280,16 +1335,31 @@ export default function EvenOddPanel({
                 >
                   {smartEntryReady ? `${smartSignal.direction.toUpperCase()} QUALIFIED` : "NO TRADE"}
                 </span>
+                <button
+                  type="button"
+                  aria-expanded={signalMonitorOpen}
+                  aria-controls="experimental-signal-monitor-details"
+                  onClick={() => setSignalMonitorOpen((open) => !open)}
+                  className="rounded-full border border-white/15 bg-black/20 px-3 py-1 text-[11px] font-bold text-white/75 transition hover:bg-white/10"
+                >
+                  {signalMonitorOpen ? "Hide monitor ▲" : "Show monitor ▼"}
+                </button>
               </div>
-              <p className="mt-2 text-sm text-white/60">
-                {currentPreviewRate === null
-                  ? payoutQuoteLoading
-                    ? "Loading current Even and Odd proposals from Deriv."
-                    : "No valid live payout is available, so automatic signal entries are blocked."
-                  : smartSignal.reason}
-              </p>
+              {signalMonitorOpen && (
+                <p className="mt-2 text-sm text-white/60">
+                  {currentPreviewRate === null
+                    ? payoutQuoteLoading
+                      ? "Loading current Even and Odd proposals from Deriv."
+                      : "No valid live payout is available, so automatic signal entries are blocked."
+                    : smartSignal.reason}
+                </p>
+              )}
             </div>
-            <div className="grid grid-cols-2 gap-2 text-center text-xs sm:grid-cols-5 lg:min-w-[680px]">
+            {signalMonitorOpen && (
+              <div
+                id="experimental-signal-monitor-details"
+                className="grid grid-cols-2 gap-2 text-center text-xs sm:grid-cols-5 lg:min-w-[680px]"
+              >
               <div className="rounded-xl border border-white/10 bg-black/20 px-3 py-2">
                 <p className="text-white/40">Model</p>
                 <p className="mt-1 font-semibold text-white/80">{smartSignal.model}</p>
@@ -1336,11 +1406,14 @@ export default function EvenOddPanel({
                     : "Collecting"}
                 </p>
               </div>
-            </div>
+              </div>
+            )}
           </div>
-          <p className="mt-3 text-xs leading-relaxed text-amber-100/65">
-            Deriv describes synthetic-index prices as RNG-generated and warns that apparent historical patterns can be coincidental. This monitor therefore treats recent-digit models as research only and requires a positive payout-adjusted result on data kept out of model selection.
-          </p>
+          {signalMonitorOpen && (
+            <p className="mt-3 text-xs leading-relaxed text-amber-100/65">
+              Deriv describes synthetic-index prices as RNG-generated and warns that apparent historical patterns can be coincidental. This monitor therefore treats recent-digit models as research only and requires a positive payout-adjusted result on data kept out of model selection.
+            </p>
+          )}
         </div>
 
         <div className="mt-5 rounded-2xl border border-amber-400/20 bg-amber-500/[0.06] p-4">

@@ -62,24 +62,31 @@ test("fixed Starter ladder stops before its maximum stake or loss limit", () => 
   );
 });
 
-test("fixed-direction pair confidence requires a meaningful live sample", () => {
+test("fixed-direction pair confidence supports the 15-tick scanner threshold", () => {
   const collecting = analyzeFixedDirectionConfidence(
-    Array.from({ length: 119 }, () => 2),
-    "Even"
+    Array.from({ length: 14 }, () => 2),
+    "Even",
+    15
   );
   assert.equal(collecting.ready, false);
 
-  const strongEven = analyzeFixedDirectionConfidence(
-    Array.from({ length: 150 }, () => 2),
-    "Even"
+  const qualifyingEven = analyzeFixedDirectionConfidence(
+    [...Array.from({ length: 9 }, () => 2), ...Array.from({ length: 6 }, () => 3)],
+    "Even",
+    15
   );
-  const weakEven = analyzeFixedDirectionConfidence(
-    Array.from({ length: 150 }, () => 3),
-    "Even"
+  const belowThresholdEven = analyzeFixedDirectionConfidence(
+    [...Array.from({ length: 8 }, () => 2), ...Array.from({ length: 7 }, () => 3)],
+    "Even",
+    15
   );
-  assert.equal(strongEven.ready, true);
-  assert.equal(strongEven.winRate, 1);
-  assert.ok(strongEven.confidenceLowerBound > weakEven.confidenceLowerBound);
+  assert.equal(qualifyingEven.ready, true);
+  assert.equal(qualifyingEven.samples, 15);
+  assert.equal(qualifyingEven.winRate, 0.6);
+  assert.ok(belowThresholdEven.winRate < 0.6);
+  assert.ok(
+    qualifyingEven.confidenceLowerBound > belowThresholdEven.confidenceLowerBound
+  );
 });
 
 test("does not qualify before the independent validation sample is available", () => {
