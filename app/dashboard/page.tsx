@@ -942,6 +942,9 @@ const selectDerivOAuthAccount = (index: number) => {
   const [pipSize, setPipSize] = useState<number>(2);
 
   const [ticks, setTicks] = useState<number[]>([]);
+  const [pairDigitsSnapshot, setPairDigitsSnapshot] = useState<
+    Partial<Record<Pair, number[]>>
+  >({});
 
   const [activeStrategy, setActiveStrategy] = useState<"matches" | "overunder" | "evenodd" | "risefall" | "mspider" | null>(null);
 useEffect(() => {
@@ -1262,6 +1265,7 @@ const resetPairNow = (p: Pair) => {
 
   // wipe UI
   setTicks([]);
+  setPairDigitsSnapshot({});
   setSelectedDigit(null);
   setLastWinDigit(null);
   setLastLossDigit(null);
@@ -1344,6 +1348,7 @@ reqInfoRef.current = {};
 );
 
     setTicks([]);
+    setPairDigitsSnapshot({});
     setSelectedDigit(null);
     setLastWinDigit(null);
     setLastLossDigit(null);
@@ -1441,6 +1446,12 @@ const digit = getLastDigit(quote, ps);
 const prev = pairDigitsRef.current[symbol] ?? [];
 const next = [...prev, digit];
 pairDigitsRef.current[symbol] = next;
+if (activeStrategyRef.current === "evenodd") {
+  setPairDigitsSnapshot((previous) => ({
+    ...previous,
+    [symbol]: next.slice(-400),
+  }));
+}
 
 // store quotes for Rise/Fall trend detection
 const prevQuotes = pairQuotesRef.current[symbol] ?? [];
@@ -2664,6 +2675,7 @@ const toggleSpiderRandomAuto = async () => {
     pairDigitsRef.current = Object.fromEntries(
       PAIRS.map((p) => [p, []])
     ) as unknown as Record<Pair, number[]>;
+    setPairDigitsSnapshot({});
 
     setTicks([]);
     setSelectedDigit(null);
@@ -3069,7 +3081,6 @@ const toggleSpiderRandomAuto = async () => {
       }}
       stake={stake}
       setStake={handleStakeChange}
-      balance={balance}
       currency={currency}
       connected={connected}
       tradeHistory={tradeHistory}
@@ -3077,6 +3088,12 @@ const toggleSpiderRandomAuto = async () => {
         placeTrade(type, duration, tradeStake)
       }
       requestPayoutPreview={requestEvenOddPreview}
+      pairDigitsByPair={pairDigitsSnapshot}
+      onRequestPairScanFeeds={() => subscribeAllPairs(PAIRS)}
+      onAutoSelectPair={(pair: Pair) => {
+        setTicks(pairDigitsSnapshot[pair] ?? []);
+        setSelectedPair(pair);
+      }}
       tradeHistoryPanel={
         <StrategyTradeHistoryTab
           title="Even/Odd Trade History"

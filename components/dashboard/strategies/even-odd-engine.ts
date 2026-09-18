@@ -18,6 +18,15 @@ export type EvenOddSignal = {
   reason: string;
 };
 
+export type FixedDirectionConfidence = {
+  ready: boolean;
+  direction: EvenOddDirection;
+  winRate: number;
+  confidenceLowerBound: number;
+  wins: number;
+  samples: number;
+};
+
 type ModelKey = "rolling-bias" | "last-parity" | "two-parity-pattern";
 
 type ModelEstimate = {
@@ -116,6 +125,30 @@ export function wilsonLowerBound(
     );
 
   return Math.max(0, (centre - spread) / denominator);
+}
+
+export function analyzeFixedDirectionConfidence(
+  sourceDigits: number[],
+  direction: EvenOddDirection,
+  minimumSamples = 120
+): FixedDirectionConfidence {
+  const digits = sourceDigits
+    .filter((digit) => Number.isInteger(digit) && digit >= 0 && digit <= 9)
+    .slice(-400);
+  const samples = digits.length;
+  const wins = digits.filter((digit) =>
+    direction === "Even" ? parity(digit) === 0 : parity(digit) === 1
+  ).length;
+  const winRate = samples ? wins / samples : 0.5;
+
+  return {
+    ready: samples >= minimumSamples,
+    direction,
+    winRate,
+    confidenceLowerBound: samples ? wilsonLowerBound(wins, samples) : 0,
+    wins,
+    samples,
+  };
 }
 
 const estimateDirection = (evenOutcomes: number, samples: number): ModelEstimate => {
@@ -364,4 +397,53 @@ export function buildAdaptiveRecoveryLadder(
   }
 
   return ladder;
+}
+
+export function buildMultiplierRecoveryLadder(
+  baseStake: number,
+  multiplier: number,
+  recoverySteps: number
+): number[] {
+  if (
+    !Number.isFinite(baseStake) ||
+    baseStake <= 0 ||
+    !Number.isFinite(multiplier) ||
+    multiplier <= 1 ||
+    !Number.isInteger(recoverySteps) ||
+    recoverySteps < 0
+  ) {
+    return [];
+  }
+
+  return Array.from({ length: recoverySteps + 1 }, (_, step) =>
+    roundStakeUp(baseStake * Math.pow(multiplier, step))
+  );
+}
+
+export function buildExecutableRecoverySequence(
+  ladder: number[],
+  maximumStake: number,
+  lossLimit: number
+): number[] {
+  if (
+    !Number.isFinite(maximumStake) ||
+    maximumStake <= 0 ||
+    !Number.isFinite(lossLimit) ||
+    lossLimit <= 0
+  ) {
+    return [];
+  }
+
+  const executable: number[] = [];
+  let exposure = 0;
+
+  for (const ladderStake of ladder) {
+    if (!Number.isFinite(ladderStake) || ladderStake <= 0) break;
+    if (ladderStake > maximumStake + 0.005) break;
+    if (exposure + ladderStake > lossLimit + 0.005) break;
+    executable.push(ladderStake);
+    exposure += ladderStake;
+  }
+
+  return executable;
 }

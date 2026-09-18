@@ -3,7 +3,10 @@ import test from "node:test";
 
 import {
   analyzeEvenOddSignal,
+  analyzeFixedDirectionConfidence,
   buildAdaptiveRecoveryLadder,
+  buildExecutableRecoverySequence,
+  buildMultiplierRecoveryLadder,
   calculateBreakEvenWinRate,
   wilsonLowerBound,
 } from "../components/dashboard/strategies/even-odd-engine.ts";
@@ -33,6 +36,50 @@ test("adaptive ladder recovers prior losses plus one base-trade profit", () => {
       ladder[step] * profitRate - priorLoss >= baseStake * profitRate - 0.005
     );
   }
+});
+
+test("fixed Starter ladder stops before its maximum stake or loss limit", () => {
+  const ladder = buildMultiplierRecoveryLadder(0.35, 2.5, 10);
+  assert.deepEqual(ladder, [
+    0.35,
+    0.88,
+    2.19,
+    5.47,
+    13.68,
+    34.18,
+    85.45,
+    213.63,
+    534.06,
+    1335.15,
+    3337.87,
+  ]);
+
+  const executable = buildExecutableRecoverySequence(ladder, 1000, 1000);
+  assert.deepEqual(executable, ladder.slice(0, 9));
+  assert.equal(
+    Number(executable.reduce((total, value) => total + value, 0).toFixed(2)),
+    889.89
+  );
+});
+
+test("fixed-direction pair confidence requires a meaningful live sample", () => {
+  const collecting = analyzeFixedDirectionConfidence(
+    Array.from({ length: 119 }, () => 2),
+    "Even"
+  );
+  assert.equal(collecting.ready, false);
+
+  const strongEven = analyzeFixedDirectionConfidence(
+    Array.from({ length: 150 }, () => 2),
+    "Even"
+  );
+  const weakEven = analyzeFixedDirectionConfidence(
+    Array.from({ length: 150 }, () => 3),
+    "Even"
+  );
+  assert.equal(strongEven.ready, true);
+  assert.equal(strongEven.winRate, 1);
+  assert.ok(strongEven.confidenceLowerBound > weakEven.confidenceLowerBound);
 });
 
 test("does not qualify before the independent validation sample is available", () => {

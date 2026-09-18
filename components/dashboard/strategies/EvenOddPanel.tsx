@@ -3,8 +3,11 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import type { Pair } from "@/app/dashboard/page";
 import {
+  analyzeFixedDirectionConfidence,
   analyzeEvenOddSignal,
   buildAdaptiveRecoveryLadder,
+  buildExecutableRecoverySequence,
+  buildMultiplierRecoveryLadder,
   roundStakeUp,
   type EvenOddDirection,
   type SignalProfile,
@@ -15,6 +18,14 @@ type PairOption = { code: string; label: string };
 type PairGroups = {
   volatility: PairOption[];
   jump: PairOption[];
+};
+
+type PairScanResult = {
+  pair: Pair;
+  label: string;
+  winRate: number;
+  confidenceLowerBound: number;
+  samples: number;
 };
 
 type EvenOddTrade = {
@@ -37,7 +48,6 @@ type EvenOddPanelProps = {
   setSelectedPair: (pair: Pair) => void;
   stake: number;
   setStake: (value: number) => void;
-  balance: number | null;
   currency: string;
   connected: boolean;
   tradeHistory: EvenOddTrade[];
@@ -48,17 +58,66 @@ type EvenOddPanelProps = {
     durationTicks: number;
     customStake: number;
   }) => Promise<{ payout: number; askPrice: number; profitRate: number }>;
+  pairDigitsByPair: Partial<Record<Pair, number[]>>;
+  onRequestPairScanFeeds: () => void;
+  onAutoSelectPair: (pair: Pair) => void;
 };
 
 const AUTO_TRADE_DELAY_MS = 750;
 const PRESET_RECOVERY_STEPS = 2;
 
-const MARTINGALE_PRESETS = [
-  { id: "starter", label: "Starter", baseStake: 0.35, profitTarget: 1 },
-  { id: "standard", label: "Standard", baseStake: 1, profitTarget: 2 },
-] as const;
+const formatCooldownTime = (seconds: number): string => {
+  const safeSeconds = Math.max(0, Math.floor(seconds));
+  const minutes = Math.floor(safeSeconds / 60);
+  const remainingSeconds = safeSeconds % 60;
+  return `${minutes}:${String(remainingSeconds).padStart(2, "0")}`;
+};
 
-type MartingalePreset = (typeof MARTINGALE_PRESETS)[number];
+type MartingalePreset = {
+  id: "starter" | "standard";
+  label: string;
+  baseStake: number;
+  profitTarget: number;
+  lossLimit: number | null;
+  autoMode: "smart" | "fixed";
+  recoveryMode: "adaptive" | "multiplier";
+  multiplier: number;
+  recoverySteps: number;
+  maximumStake: number | null;
+  maximumTrades: number;
+  description: string;
+};
+
+const MARTINGALE_PRESETS: readonly MartingalePreset[] = [
+  {
+    id: "starter",
+    label: "Starter",
+    baseStake: 0.35,
+    profitTarget: 1,
+    lossLimit: 1000,
+    autoMode: "fixed",
+    recoveryMode: "multiplier",
+    multiplier: 2.5,
+    recoverySteps: 10,
+    maximumStake: 1000,
+    maximumTrades: 20,
+    description: "Fixed entry • 2.5x recovery • 10 steps • 20 trades max",
+  },
+  {
+    id: "standard",
+    label: "Standard",
+    baseStake: 1,
+    profitTarget: 2,
+    lossLimit: null,
+    autoMode: "smart",
+    recoveryMode: "adaptive",
+    multiplier: 2,
+    recoverySteps: PRESET_RECOVERY_STEPS,
+    maximumStake: null,
+    maximumTrades: 10,
+    description: "Research entry • 2 payout-aware recovery steps",
+  },
+];
 
 export default function EvenOddPanel({
   indexGroups,
@@ -67,13 +126,15 @@ export default function EvenOddPanel({
   setSelectedPair,
   stake,
   setStake,
-  balance,
   currency,
   connected,
   tradeHistory,
   tradeHistoryPanel,
   onPlaceTrade,
   requestPayoutPreview,
+  pairDigitsByPair,
+  onRequestPairScanFeeds,
+  onAutoSelectPair,
 }: EvenOddPanelProps) {
   const [direction, setDirection] = useState<EvenOddDirection>("Even");
   const [autoMode, setAutoMode] = useState<"smart" | "fixed">("smart");
@@ -86,8 +147,16 @@ export default function EvenOddPanel({
   const [martingaleMultiplier, setMartingaleMultiplier] = useState("2");
   const [maxRecoverySteps, setMaxRecoverySteps] = useState("3");
   const [maxMartingaleStake, setMaxMartingaleStake] = useState("25");
-  const [maxSequenceRiskPercent, setMaxSequenceRiskPercent] = useState("1");
   const [maxSessionTrades, setMaxSessionTrades] = useState("10");
+  const [martingaleDetailsOpen, setMartingaleDetailsOpen] = useState(true);
+  const [profitCooldownMinutes, setProfitCooldownMinutes] = useState("2");
+  const [profitCooldownRemainingSeconds, setProfitCooldownRemainingSeconds] = useState<
+    number | null
+  >(null);
+  const [pairScannerEnabled, setPairScannerEnabled] = useState(false);
+  const [pairScannerStatus, setPairScannerStatus] = useState(
+    "Best Pair Scan is off."
+  );
   const [autoRunning, setAutoRunning] = useState(false);
   const [sessionStartedAt, setSessionStartedAt] = useState<number | null>(null);
   const [sessionBaseStake, setSessionBaseStake] = useState<number | null>(null);
@@ -123,12 +192,43 @@ export default function EvenOddPanel({
   const lastAutoTradeTickRef = useRef(-1);
   const lastHandledSettlementRef = useRef<number | null>(null);
   const resumeAfterTickRef = useRef(0);
+  const scannerLockedPairRef = useRef<Pair | null>(null);
 
   const recentDigits = ticks.slice(-100);
   const last20 = ticks.slice(-20);
   const evenCount = recentDigits.filter((digit) => digit % 2 === 0).length;
   const evenPercent = recentDigits.length ? (evenCount / recentDigits.length) * 100 : 0;
   const oddPercent = recentDigits.length ? 100 - evenPercent : 0;
+  const pairScanRankings = useMemo(() => {
+    const pairOptions = [...indexGroups.volatility, ...indexGroups.jump];
+
+    return pairOptions
+      .map((option): PairScanResult | null => {
+        const pair = option.code as Pair;
+        const confidence = analyzeFixedDirectionConfidence(
+          pairDigitsByPair[pair] ?? [],
+          direction
+        );
+        if (!confidence.ready) return null;
+
+        return {
+          pair,
+          label: option.label,
+          winRate: confidence.winRate,
+          confidenceLowerBound: confidence.confidenceLowerBound,
+          samples: confidence.samples,
+        };
+      })
+      .filter((result): result is PairScanResult => result !== null)
+      .sort(
+        (a, b) =>
+          b.confidenceLowerBound - a.confidenceLowerBound ||
+          b.winRate - a.winRate ||
+          b.samples - a.samples
+      );
+  }, [direction, indexGroups.jump, indexGroups.volatility, pairDigitsByPair]);
+  const bestScannedPair = pairScanRankings[0] ?? null;
+  const totalPairScanCandidates = indexGroups.volatility.length + indexGroups.jump.length;
   const evenOddTrades = useMemo(
     () => tradeHistory.filter((trade) => trade.source === "Even/Odd"),
     [tradeHistory]
@@ -151,8 +251,8 @@ export default function EvenOddPanel({
   const martingaleMultiplierValue = Number(martingaleMultiplier);
   const maxRecoveryStepsValue = Number(maxRecoverySteps);
   const maxMartingaleStakeValue = Number(maxMartingaleStake);
-  const maxSequenceRiskPercentValue = Number(maxSequenceRiskPercent);
   const maxSessionTradesValue = Number(maxSessionTrades);
+  const profitCooldownMinutesValue = Number(profitCooldownMinutes);
   const baseAutoStake = sessionBaseStake ?? stake;
   const settledSessionTrades = useMemo(
     () =>
@@ -202,8 +302,12 @@ export default function EvenOddPanel({
     payoutPreview.settledCount === sessionSettledCount
       ? payoutPreview.profitRate
       : null;
+  const selectedPreset = MARTINGALE_PRESETS.find(
+    (preset) => preset.id === selectedPresetId
+  );
   const presetRequiresRefresh =
     selectedPresetId !== null &&
+    selectedPreset?.recoveryMode === "adaptive" &&
     connected &&
     (currentPreviewRate === null ||
       presetConfiguration === null ||
@@ -265,26 +369,26 @@ export default function EvenOddPanel({
       return buildAdaptiveRecoveryLadder(stake, recoveryProfitRate, maxRecoveryStepsValue);
     }
 
-    return Array.from({ length: maxRecoveryStepsValue + 1 }, (_, step) =>
-      roundStakeUp(stake * Math.pow(martingaleMultiplierValue, step))
+    return buildMultiplierRecoveryLadder(
+      stake,
+      martingaleMultiplierValue,
+      maxRecoveryStepsValue
     );
   })();
   const projectedSequenceStakes = martingaleEnabled
-    ? projectedMartingaleStakes
+    ? buildExecutableRecoverySequence(
+        projectedMartingaleStakes,
+        maxMartingaleStakeValue,
+        lossLimitValue
+      )
     : [roundStakeUp(stake)];
   const projectedTotalExposure = roundStakeUp(
     projectedSequenceStakes.reduce((total, projectedStake) => total + projectedStake, 0)
   );
-  const sequenceRiskLimit =
-    balance !== null && Number.isFinite(maxSequenceRiskPercentValue)
-      ? (balance * maxSequenceRiskPercentValue) / 100
-      : null;
-  const sequenceRiskExceeded =
-    sequenceRiskLimit !== null && projectedTotalExposure > sequenceRiskLimit + 0.005;
   const sessionTradeLimitReached = sessionSettledCount >= maxSessionTradesValue;
   const sequenceFailureProbability =
-    Number.isInteger(maxRecoveryStepsValue) && maxRecoveryStepsValue >= 0
-      ? Math.pow(0.5, maxRecoveryStepsValue + 1)
+    projectedSequenceStakes.length > 0
+      ? Math.pow(0.5, projectedSequenceStakes.length)
       : 0;
   const autoDirection = autoMode === "smart" ? smartSignal.direction : direction;
   const recoveryPauseRemaining = Math.max(0, resumeAfterTickDisplay - ticks.length);
@@ -367,6 +471,7 @@ export default function EvenOddPanel({
       latestSettledTrade.id !== lastHandledSettlementRef.current
     ) {
       lastHandledSettlementRef.current = latestSettledTrade.id;
+      scannerLockedPairRef.current = null;
       resumeAfterTickRef.current =
         latestSettledTrade.result === "Loss" ? ticks.length + 2 : ticks.length;
       window.setTimeout(() => setResumeAfterTickDisplay(resumeAfterTickRef.current), 0);
@@ -380,12 +485,17 @@ export default function EvenOddPanel({
       return () => window.clearTimeout(stopTimer);
     }
 
+    if (profitCooldownRemainingSeconds !== null) return;
+
     if (sessionNet >= profitTargetValue) {
-      const stopTimer = window.setTimeout(() => {
-        setAutoRunning(false);
-        setAutoStatus(`Profit target reached: +${sessionNet.toFixed(2)} ${currency}`);
+      const cooldownTimer = window.setTimeout(() => {
+        const cooldownSeconds = profitCooldownMinutesValue * 60;
+        setProfitCooldownRemainingSeconds(cooldownSeconds);
+        setAutoStatus(
+          `Profit target reached: +${sessionNet.toFixed(2)} ${currency}. Cooling down for ${profitCooldownMinutesValue} minutes.`
+        );
       }, 0);
-      return () => window.clearTimeout(stopTimer);
+      return () => window.clearTimeout(cooldownTimer);
     }
 
     if (sessionNet <= -lossLimitValue) {
@@ -401,16 +511,6 @@ export default function EvenOddPanel({
         setAutoRunning(false);
         setAutoStatus(
           `Session trade cap reached after ${sessionSettledCount} settled contracts.`
-        );
-      }, 0);
-      return () => window.clearTimeout(stopTimer);
-    }
-
-    if (sequenceRiskExceeded) {
-      const stopTimer = window.setTimeout(() => {
-        setAutoRunning(false);
-        setAutoStatus(
-          `Auto Trade stopped because the full stake sequence (${projectedTotalExposure.toFixed(2)} ${currency}) exceeds the bankroll risk cap.`
         );
       }, 0);
       return () => window.clearTimeout(stopTimer);
@@ -448,6 +548,30 @@ export default function EvenOddPanel({
 
     if (hasPendingTrade || autoTimerRef.current !== null) return;
     if (ticks.length < resumeAfterTickRef.current) return;
+    if (pairScannerEnabled && autoMode === "fixed") {
+      if (!bestScannedPair) return;
+
+      const scannerTarget = scannerLockedPairRef.current ?? bestScannedPair.pair;
+      scannerLockedPairRef.current = scannerTarget;
+
+      if (scannerTarget !== selectedPair) {
+        const targetResult = pairScanRankings.find(
+          (result) => result.pair === scannerTarget
+        );
+        const targetTickCount = pairDigitsByPair[scannerTarget]?.length ?? 0;
+        const switchTimer = window.setTimeout(() => {
+          lastAutoTradeTickRef.current = targetTickCount;
+          setLastAutoTradeTickDisplay(targetTickCount);
+          onAutoSelectPair(scannerTarget);
+          setPairScannerStatus(
+            targetResult
+              ? `Switched to ${targetResult.label}: ${(targetResult.winRate * 100).toFixed(1)}% ${direction.toLowerCase()} win rate with a ${(targetResult.confidenceLowerBound * 100).toFixed(1)}% confidence floor.`
+              : `Switched to ${scannerTarget}.`
+          );
+        }, 0);
+        return () => window.clearTimeout(switchTimer);
+      }
+    }
     if (ticks.length <= lastAutoTradeTickRef.current) return;
     if (!adaptivePayoutReady) return;
     if (autoMode === "smart" && !smartEntryReady) return;
@@ -474,6 +598,7 @@ export default function EvenOddPanel({
     connected,
     currency,
     consecutiveLosses,
+    direction,
     duration,
     hasPendingTrade,
     latestSettledTrade,
@@ -482,14 +607,58 @@ export default function EvenOddPanel({
     martingaleStakeExceeded,
     martingaleStepsExceeded,
     nextAutoStake,
+    onAutoSelectPair,
+    pairDigitsByPair,
+    pairScannerEnabled,
+    pairScanRankings,
+    profitCooldownMinutesValue,
+    profitCooldownRemainingSeconds,
     profitTargetValue,
-    projectedTotalExposure,
-    sequenceRiskExceeded,
     sessionNet,
     sessionSettledCount,
     sessionStartedAt,
     sessionTradeLimitReached,
+    selectedPair,
     smartEntryReady,
+    bestScannedPair,
+    ticks.length,
+  ]);
+
+  useEffect(() => {
+    if (!autoRunning || profitCooldownRemainingSeconds === null) return;
+
+    if (profitCooldownRemainingSeconds <= 0) {
+      const restartTimer = window.setTimeout(() => {
+        const nextSessionBoundary =
+          Math.max(
+            Number(latestSettledTrade?.createdAt ?? 0),
+            Number(sessionStartedAt ?? 0)
+          ) + 1;
+        setSessionStartedAt(nextSessionBoundary);
+        setProfitCooldownRemainingSeconds(null);
+        scannerLockedPairRef.current = null;
+        lastAutoTradeTickRef.current = ticks.length;
+        setLastAutoTradeTickDisplay(ticks.length);
+        lastHandledSettlementRef.current = null;
+        resumeAfterTickRef.current = ticks.length;
+        setResumeAfterTickDisplay(ticks.length);
+        setAutoStatus("Profit cooldown finished. Auto Trade is waiting for a fresh entry.");
+      }, 0);
+      return () => window.clearTimeout(restartTimer);
+    }
+
+    const countdownTimer = window.setInterval(() => {
+      setProfitCooldownRemainingSeconds((remaining) =>
+        remaining === null ? null : Math.max(0, remaining - 1)
+      );
+    }, 1000);
+
+    return () => window.clearInterval(countdownTimer);
+  }, [
+    autoRunning,
+    latestSettledTrade?.createdAt,
+    profitCooldownRemainingSeconds,
+    sessionStartedAt,
     ticks.length,
   ]);
 
@@ -506,22 +675,38 @@ export default function EvenOddPanel({
     status: string,
     live: boolean
   ) => {
-    const ladder = buildAdaptiveRecoveryLadder(
-      preset.baseStake,
-      profitRate,
-      PRESET_RECOVERY_STEPS
-    );
+    const ladder =
+      preset.recoveryMode === "adaptive"
+        ? buildAdaptiveRecoveryLadder(
+            preset.baseStake,
+            profitRate,
+            preset.recoverySteps
+          )
+        : buildMultiplierRecoveryLadder(
+            preset.baseStake,
+            preset.multiplier,
+            preset.recoverySteps
+          );
     const totalExposure = roundStakeUp(
       ladder.reduce((total, ladderStake) => total + ladderStake, 0)
     );
 
     setStake(preset.baseStake);
     setProfitTarget(String(preset.profitTarget));
-    setLossLimit(totalExposure.toFixed(2));
+    setLossLimit(String(preset.lossLimit ?? totalExposure.toFixed(2)));
+    setAutoMode(preset.autoMode);
+    setPairScannerEnabled(false);
+    setPairScannerStatus("Best Pair Scan is off.");
+    scannerLockedPairRef.current = null;
     setMartingaleEnabled(true);
-    setRecoveryMode("adaptive");
-    setMaxRecoverySteps(String(PRESET_RECOVERY_STEPS));
-    setMaxMartingaleStake(String(ladder[ladder.length - 1] ?? preset.baseStake));
+    setRecoveryMode(preset.recoveryMode);
+    setMartingaleMultiplier(String(preset.multiplier));
+    setMaxRecoverySteps(String(preset.recoverySteps));
+    setMaxMartingaleStake(
+      String(preset.maximumStake ?? ladder[ladder.length - 1] ?? preset.baseStake)
+    );
+    setMaxSessionTrades(String(preset.maximumTrades));
+    setMartingaleDetailsOpen(true);
     setSelectedPresetId(preset.id);
     setPresetConfiguration({
       id: preset.id,
@@ -547,7 +732,9 @@ export default function EvenOddPanel({
         configurePreset(
           preset,
           0.9,
-          "Preset applied with a temporary 90% return estimate. Connect Deriv and re-apply it to use live payouts.",
+          preset.recoveryMode === "multiplier"
+            ? "Starter applied with fixed entry and 2.5x recovery. Connect Deriv before starting Auto Trade."
+            : "Preset applied with a temporary 90% return estimate. Connect Deriv and re-apply it to use live payouts.",
           false
         );
         return;
@@ -586,7 +773,9 @@ export default function EvenOddPanel({
       configurePreset(
         preset,
         conservativeProfitRate,
-        `Live payout loaded: Even ${(evenPreview.profitRate * 100).toFixed(1)}%, Odd ${(oddPreview.profitRate * 100).toFixed(1)}%. The ladder uses the lower return.`,
+        preset.recoveryMode === "adaptive"
+          ? `Live payout loaded: Even ${(evenPreview.profitRate * 100).toFixed(1)}%, Odd ${(oddPreview.profitRate * 100).toFixed(1)}%. The ladder uses the lower return.`
+          : `Starter applied: fixed entry, 2.5x recovery, 10 recovery steps, 1,000 ${currency} loss and maximum-stake limits, and 20 trades maximum.`,
         true
       );
     } catch (error) {
@@ -594,7 +783,9 @@ export default function EvenOddPanel({
       configurePreset(
         preset,
         0.9,
-        `${error instanceof Error ? error.message : "Could not load the live payout."} Preset applied with a temporary 90% return estimate; re-apply before trading.`,
+        preset.recoveryMode === "multiplier"
+          ? `${error instanceof Error ? error.message : "Could not load the live payout."} Starter fixed settings were still applied; the live quote will retry automatically.`
+          : `${error instanceof Error ? error.message : "Could not load the live payout."} Preset applied with a temporary 90% return estimate; re-apply before trading.`,
         false
       );
     } finally {
@@ -610,9 +801,6 @@ export default function EvenOddPanel({
 
   const startAutoTrade = (startedAt: number) => {
     if (!connected) return alert("Connect your Deriv account first");
-    if (balance === null || !Number.isFinite(balance)) {
-      return alert("Wait for your Deriv balance to load so the bankroll risk cap can be checked");
-    }
     if (autoMode === "smart" && payoutQuoteLoading) {
       return alert("Wait for the current live Even/Odd payout quote");
     }
@@ -638,18 +826,14 @@ export default function EvenOddPanel({
       return alert("Your starting stake must not be greater than your loss limit");
     }
     if (
-      !Number.isFinite(maxSequenceRiskPercentValue) ||
-      maxSequenceRiskPercentValue < 0.1 ||
-      maxSequenceRiskPercentValue > 5
-    ) {
-      return alert("Maximum sequence risk must be between 0.1% and 5% of balance");
-    }
-    if (
       !Number.isInteger(maxSessionTradesValue) ||
       maxSessionTradesValue < 1 ||
       maxSessionTradesValue > 50
     ) {
       return alert("Maximum session trades must be a whole number from 1 to 50");
+    }
+    if (![2, 5, 7, 10].includes(profitCooldownMinutesValue)) {
+      return alert("Choose a profit cooldown of 2, 5, 7, or 10 minutes");
     }
     if (martingaleEnabled) {
       if (
@@ -668,18 +852,12 @@ export default function EvenOddPanel({
       if (!Number.isFinite(maxMartingaleStakeValue) || maxMartingaleStakeValue < stake) {
         return alert("Maximum Martingale stake must be at least your starting stake");
       }
-      if (projectedMartingaleStakes.some((projectedStake) => projectedStake > maxMartingaleStakeValue)) {
-        return alert("The projected recovery ladder exceeds your maximum Martingale stake");
-      }
-    }
-    if (sequenceRiskExceeded) {
-      return alert(
-        `The full stake sequence is ${projectedTotalExposure.toFixed(2)} ${currency}, above your ${maxSequenceRiskPercentValue.toFixed(1)}% bankroll cap. Reduce the stake or raise the cap deliberately.`
-      );
     }
     if (hasAnyPendingEvenOddTrade) return alert("Wait for the current Even/Odd trade to settle");
 
     setSessionStartedAt(startedAt);
+    setProfitCooldownRemainingSeconds(null);
+    scannerLockedPairRef.current = null;
     setSessionBaseStake(stake);
     lastAutoTradeTickRef.current = ticks.length;
     setLastAutoTradeTickDisplay(ticks.length);
@@ -697,6 +875,8 @@ export default function EvenOddPanel({
   const stopAutoTrade = () => {
     autoRunningRef.current = false;
     setAutoRunning(false);
+    setProfitCooldownRemainingSeconds(null);
+    scannerLockedPairRef.current = null;
     setAutoStatus("Auto Trade stopped. An open contract will still settle normally.");
     if (autoTimerRef.current !== null) {
       window.clearTimeout(autoTimerRef.current);
@@ -712,10 +892,19 @@ export default function EvenOddPanel({
   };
 
   const displayedAutoStatus = autoRunning
-    ? hasPendingTrade
+    ? profitCooldownRemainingSeconds !== null
+      ? `Profit target reached. Auto Trade restarts in ${formatCooldownTime(profitCooldownRemainingSeconds)}.`
+      : hasPendingTrade
       ? "Waiting for the current contract to settle..."
       : recoveryPauseRemaining > 0
         ? `Recovery cooldown: waiting ${recoveryPauseRemaining} more tick${recoveryPauseRemaining === 1 ? "" : "s"}.`
+        : pairScannerEnabled && autoMode === "fixed" && !bestScannedPair
+          ? `Best Pair Scan: ${pairScanRankings.length}/${totalPairScanCandidates} pairs have at least 120 live digits.`
+          : pairScannerEnabled &&
+              autoMode === "fixed" &&
+              bestScannedPair &&
+              bestScannedPair.pair !== selectedPair
+            ? `Best Pair Scan is preparing ${bestScannedPair.label} for fixed ${direction}.`
         : !adaptivePayoutReady
           ? "Waiting for a fresh live Deriv payout before sizing the next recovery trade."
         : autoMode === "smart" && !smartEntryReady
@@ -735,7 +924,7 @@ export default function EvenOddPanel({
         <div>
           <p className="text-2xl font-bold text-white">Even/Odd Strategy</p>
           <p className="mt-1 max-w-2xl text-sm text-white/55">
-            Use live payout break-even checks, independent validation, and bankroll-capped recovery. Historical digit patterns remain experimental, not a guaranteed edge.
+            Use live payout break-even checks, independent validation, and hard recovery stops. Historical digit patterns remain experimental, not a guaranteed edge.
           </p>
         </div>
 
@@ -795,7 +984,7 @@ export default function EvenOddPanel({
             <div>
               <p className="font-semibold text-cyan-100">Payout-aware Martingale Presets</p>
               <p className="mt-1 max-w-3xl text-xs leading-relaxed text-white/55">
-                Each preset uses two recovery steps. The profit target is a session stop, while every recovery stake is calculated from Deriv&apos;s lower live Even/Odd return and checked against your bankroll cap.
+                Presets load a complete Auto Trade configuration. Adaptive recovery uses Deriv&apos;s lower live Even/Odd return; fixed recovery follows its selected multiplier. Both remain subject to hard loss, stake, recovery-step, and trade-count stops.
               </p>
             </div>
             <span className="rounded-full border border-cyan-400/20 bg-cyan-500/10 px-3 py-1 text-[11px] font-bold text-cyan-100">
@@ -832,7 +1021,7 @@ export default function EvenOddPanel({
                   </span>
                 </div>
                 <p className="mt-3 text-xs text-white/50">
-                  Base + {PRESET_RECOVERY_STEPS} recovery trades • live-calculated maximum stake and loss limit
+                  {preset.description}
                 </p>
               </button>
             ))}
@@ -907,7 +1096,15 @@ export default function EvenOddPanel({
                   key={mode}
                   type="button"
                   disabled={autoRunning}
-                  onClick={() => setAutoMode(mode)}
+                  onClick={() => {
+                    markPresetCustomized();
+                    setAutoMode(mode);
+                    if (mode === "smart") {
+                      setPairScannerEnabled(false);
+                      setPairScannerStatus("Best Pair Scan is off.");
+                      scannerLockedPairRef.current = null;
+                    }
+                  }}
                   className={`rounded-xl border px-4 py-3 font-semibold transition disabled:opacity-60 ${
                     autoMode === mode
                       ? "border-purple-400/40 bg-purple-500/20 text-purple-100"
@@ -943,7 +1140,13 @@ export default function EvenOddPanel({
                     key={type}
                     type="button"
                     disabled={autoRunning}
-                    onClick={() => setDirection(type)}
+                    onClick={() => {
+                      setDirection(type);
+                      scannerLockedPairRef.current = null;
+                      if (pairScannerEnabled) {
+                        setPairScannerStatus(`Scanning all pairs for fixed ${type}...`);
+                      }
+                    }}
                     className={`rounded-xl border px-4 py-3 font-semibold transition disabled:opacity-60 ${
                       direction === type
                         ? "border-purple-400/40 bg-purple-500/20 text-purple-100"
@@ -954,6 +1157,39 @@ export default function EvenOddPanel({
                   </button>
                 ))}
               </div>
+              <button
+                type="button"
+                onClick={() => {
+                  const nextEnabled = !pairScannerEnabled;
+                  setPairScannerEnabled(nextEnabled);
+                  scannerLockedPairRef.current = null;
+                  if (nextEnabled) {
+                    onRequestPairScanFeeds();
+                    setPairScannerStatus(
+                      `Collecting at least 120 live digits per pair for fixed ${direction}...`
+                    );
+                  } else {
+                    setPairScannerStatus("Best Pair Scan is off.");
+                  }
+                }}
+                className={`mt-2 w-full rounded-xl border px-4 py-3 text-xs font-bold transition ${
+                  pairScannerEnabled
+                    ? "border-cyan-300/40 bg-cyan-400/15 text-cyan-100"
+                    : "border-white/10 bg-white/5 text-white/65 hover:bg-white/10"
+                }`}
+              >
+                {pairScannerEnabled ? "Best Pair Scan On" : "Best Pair Scan Off"}
+              </button>
+              <p className="mt-2 text-[11px] leading-relaxed text-white/45">
+                {pairScannerEnabled && bestScannedPair
+                  ? `Best now: ${bestScannedPair.label} • ${(bestScannedPair.winRate * 100).toFixed(1)}% ${direction.toLowerCase()} wins • ${(bestScannedPair.confidenceLowerBound * 100).toFixed(1)}% confidence floor • ${bestScannedPair.samples} ticks`
+                  : pairScannerEnabled
+                    ? `${pairScanRankings.length}/${totalPairScanCandidates} pairs have enough data. ${pairScannerStatus}`
+                    : pairScannerStatus}
+              </p>
+              <p className="mt-1 text-[10px] text-amber-100/60">
+                Ranking uses the 95% confidence floor, then observed win rate. It identifies the strongest recent sample, not a guaranteed predictive edge.
+              </p>
             </div>
           )}
 
@@ -990,22 +1226,6 @@ export default function EvenOddPanel({
           </label>
 
           <label className="space-y-2 text-sm text-white/75">
-            <span className="block text-xs uppercase tracking-[0.18em] text-white/45">Max Sequence Risk</span>
-            <select
-              value={maxSequenceRiskPercent}
-              disabled={autoRunning}
-              onChange={(event) => setMaxSequenceRiskPercent(event.target.value)}
-              className="w-full rounded-xl border border-amber-400/20 bg-[#0b1220] px-4 py-3 text-white outline-none disabled:opacity-60"
-            >
-              <option value="0.5">0.5% of balance</option>
-              <option value="1">1% of balance — recommended</option>
-              <option value="2">2% of balance</option>
-              <option value="3">3% of balance — high risk</option>
-              <option value="5">5% of balance — very high risk</option>
-            </select>
-          </label>
-
-          <label className="space-y-2 text-sm text-white/75">
             <span className="block text-xs uppercase tracking-[0.18em] text-white/45">Max Session Trades</span>
             <input
               type="number"
@@ -1014,9 +1234,29 @@ export default function EvenOddPanel({
               step="1"
               value={maxSessionTrades}
               disabled={autoRunning}
-              onChange={(event) => setMaxSessionTrades(event.target.value)}
+              onChange={(event) => {
+                markPresetCustomized();
+                setMaxSessionTrades(event.target.value);
+              }}
               className="w-full rounded-xl border border-white/10 bg-[#0b1220] px-4 py-3 text-white outline-none disabled:opacity-60"
             />
+          </label>
+
+          <label className="space-y-2 text-sm text-white/75">
+            <span className="block text-xs uppercase tracking-[0.18em] text-white/45">
+              Profit Target Cooldown
+            </span>
+            <select
+              value={profitCooldownMinutes}
+              disabled={autoRunning}
+              onChange={(event) => setProfitCooldownMinutes(event.target.value)}
+              className="w-full rounded-xl border border-emerald-400/20 bg-[#0b1220] px-4 py-3 text-white outline-none disabled:opacity-60"
+            >
+              <option value="2">Restart after 2 minutes</option>
+              <option value="5">Restart after 5 minutes</option>
+              <option value="7">Restart after 7 minutes</option>
+              <option value="10">Restart after 10 minutes</option>
+            </select>
           </label>
         </div>
 
@@ -1111,24 +1351,43 @@ export default function EvenOddPanel({
                 Increase the next Auto Trade stake after a loss and reset to the starting stake after a win.
               </p>
             </div>
-            <button
-              type="button"
-              disabled={autoRunning}
-              onClick={() => {
-                markPresetCustomized();
-                setMartingaleEnabled((enabled) => !enabled);
-              }}
-              className={`rounded-full border px-4 py-2 text-xs font-bold transition disabled:opacity-60 ${
-                martingaleEnabled
-                  ? "border-amber-300/40 bg-amber-400/20 text-amber-100"
-                  : "border-white/10 bg-white/5 text-white/65 hover:bg-white/10"
-              }`}
-            >
-              {martingaleEnabled ? "Martingale On" : "Martingale Off"}
-            </button>
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                disabled={autoRunning}
+                onClick={() => {
+                  markPresetCustomized();
+                  const nextEnabled = !martingaleEnabled;
+                  setMartingaleEnabled(nextEnabled);
+                  if (nextEnabled) setMartingaleDetailsOpen(true);
+                }}
+                className={`rounded-full border px-4 py-2 text-xs font-bold transition disabled:opacity-60 ${
+                  martingaleEnabled
+                    ? "border-amber-300/40 bg-amber-400/20 text-amber-100"
+                    : "border-white/10 bg-white/5 text-white/65 hover:bg-white/10"
+                }`}
+              >
+                {martingaleEnabled ? "Martingale On" : "Martingale Off"}
+              </button>
+              {martingaleEnabled && (
+                <button
+                  type="button"
+                  aria-expanded={martingaleDetailsOpen}
+                  aria-label={
+                    martingaleDetailsOpen
+                      ? "Collapse Martingale settings"
+                      : "Expand Martingale settings"
+                  }
+                  onClick={() => setMartingaleDetailsOpen((open) => !open)}
+                  className="rounded-full border border-amber-300/25 bg-black/20 px-3 py-2 text-xs font-bold text-amber-100 transition hover:bg-amber-400/10"
+                >
+                  {martingaleDetailsOpen ? "Hide settings ▲" : "Show settings ▼"}
+                </button>
+              )}
+            </div>
           </div>
 
-          {martingaleEnabled && (
+          {martingaleEnabled && martingaleDetailsOpen && (
             <div className="mt-4 space-y-4">
               <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
                 <label className="space-y-2 text-sm text-white/75">
@@ -1223,18 +1482,18 @@ export default function EvenOddPanel({
                   </p>
                   <div className="mt-2 flex flex-wrap gap-2">
                     {projectedMartingaleStakes.map((projectedStake, step) => {
-                      const exceedsMaximum = projectedStake > maxMartingaleStakeValue;
+                      const exceedsHardStop = step >= projectedSequenceStakes.length;
                       return (
                         <span
                           key={`${step}-${projectedStake}`}
                           className={`rounded-lg border px-3 py-2 text-xs font-semibold ${
-                            exceedsMaximum
+                            exceedsHardStop
                               ? "border-red-400/30 bg-red-500/10 text-red-200"
                               : "border-amber-400/20 bg-amber-500/10 text-amber-100"
                           }`}
                         >
                           {step === 0 ? "Base" : `Step ${step}`}: {projectedStake.toFixed(2)} {currency}
-                          {exceedsMaximum ? " • STOP" : ""}
+                          {exceedsHardStop ? " • STOP" : ""}
                         </span>
                       );
                     })}
@@ -1242,29 +1501,13 @@ export default function EvenOddPanel({
                 </div>
               )}
 
-              <div className="grid gap-3 sm:grid-cols-3">
-                <div
-                  className={`rounded-xl border px-4 py-3 ${
-                    sequenceRiskExceeded
-                      ? "border-red-400/30 bg-red-500/10"
-                      : "border-emerald-400/20 bg-emerald-500/[0.06]"
-                  }`}
-                >
+              <div className="grid gap-3 sm:grid-cols-2">
+                <div className="rounded-xl border border-emerald-400/20 bg-emerald-500/[0.06] px-4 py-3">
                   <p className="text-[11px] uppercase tracking-[0.14em] text-white/45">
                     Full sequence exposure
                   </p>
-                  <p className={`mt-2 font-bold ${sequenceRiskExceeded ? "text-red-200" : "text-emerald-200"}`}>
+                  <p className="mt-2 font-bold text-emerald-200">
                     {projectedTotalExposure.toFixed(2)} {currency}
-                  </p>
-                </div>
-                <div className="rounded-xl border border-white/10 bg-black/20 px-4 py-3">
-                  <p className="text-[11px] uppercase tracking-[0.14em] text-white/45">
-                    Bankroll cap
-                  </p>
-                  <p className="mt-2 font-bold text-white/80">
-                    {sequenceRiskLimit === null
-                      ? "Balance unavailable"
-                      : `${sequenceRiskLimit.toFixed(2)} ${currency}`}
                   </p>
                 </div>
                 <div className="rounded-xl border border-white/10 bg-black/20 px-4 py-3">
@@ -1279,7 +1522,7 @@ export default function EvenOddPanel({
               </div>
 
               <p className="text-xs leading-relaxed text-amber-100/70">
-                Adaptive sizing uses live proposal returns to target accumulated losses plus one base-trade profit. It changes the distribution of wins and losses, not the contract&apos;s expected value or accuracy. After a loss, Auto Trade waits two fresh ticks; recovery-step, maximum-stake, bankroll, trade-count, and session-loss limits remain enforced.
+                Adaptive sizing uses live proposal returns to target accumulated losses plus one base-trade profit; fixed sizing uses the selected multiplier. Neither changes the contract&apos;s expected value or accuracy. After a loss, Auto Trade waits two fresh ticks; recovery-step, maximum-stake, trade-count, and session-loss limits remain enforced.
               </p>
             </div>
           )}
